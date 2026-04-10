@@ -1,0 +1,11 @@
+[Unit]
+Description=Knowledge Base weekly backup
+Documentation=https://github.com/user/knowledge-base
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/knowledge-base/scripts/backup.sh
+Environment=KB_DATA_DIR=%h/projects/knowledge-base/data
+Environment=KB_CONFIG_DIR=%h/projects/knowledge-base
+
+Restart=no

@@ -1,0 +1,35 @@
+[Unit]
+Description=Smriti — persistent second memory MCP server
+After=network.target
+# Restart if the process crashes but not on clean exit
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/smriti
+Restart=on-failure
+RestartSec=5
+
+# Transport
+Environment=KB_TRANSPORT=http
+Environment=KB_HTTP_PORT=3001
+
+# Data directories — adjust if you change locations
+Environment=KB_DATA_DIR=%h/arche/smriti/data
+Environment=KB_CONFIG_DIR=%h/arche/smriti
+Environment=KB_QUEUE_DIR=%h/arche/smriti/queue
+Environment=KB_ARCHIVE_DIR=%h/arche/smriti/archive
+
+# Logging: INFO by default, set to DEBUG for troubleshooting
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h/arche/smriti
+ReadWritePaths=%h/.cache/fastembed
+ReadWritePaths=%h/.claude
+
+[Install]
+WantedBy=default.target

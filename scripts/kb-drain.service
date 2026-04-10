@@ -1,0 +1,13 @@
+[Unit]
+Description=Knowledge Base queue drain
+Documentation=https://github.com/user/knowledge-base
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/knowledge-base/scripts/drain.sh
+Environment=KB_DATA_DIR=%h/projects/knowledge-base/data
+Environment=KB_CONFIG_DIR=%h/projects/knowledge-base
+Environment=KB_QUEUE_DIR=%h/projects/knowledge-base/queue
+
+# Don't restart on failure — the timer will try again next interval
+Restart=no
