@@ -160,4 +160,8 @@ In daemon mode, all Claude Code sessions share one process and one database conn
 
 ## License
 
-MIT
+Licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+You are free to use, modify, and distribute this software. If you modify it and
+run it as a service or distribute it, you must release your changes under the
+same license. Commercial use without open-sourcing modifications is not permitted.

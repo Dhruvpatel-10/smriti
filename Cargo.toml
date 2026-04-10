@@ -3,6 +3,7 @@ name = "smriti"
 version = "0.1.0"
 edition = "2024"
 description = "Persistent second memory for your personal AI system — local-first MCP server backed by SurrealDB."
+license = "AGPL-3.0-only"
 
 [[bin]]
 name = "smriti"
