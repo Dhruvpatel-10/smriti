@@ -1,0 +1,32 @@
+[database]
+path = "data/"
+
+[pruning]
+working_scratch_ttl_hours = 48
+working_priority_ttl_days = 7
+working_open_question_ttl_days = 30
+access_decay_interval_days = 7
+consolidation_interval_hours = 24
+importance_archive_threshold = 1
+
+[queue]
+drain_interval_secs = 300
+max_queue_size = 1000
+
+[alerts]
+overdue_action_item_days = 1
+stale_contact_days = 14
+expiring_memory_hours = 24
+
+[export]
+backup_dir = "archive/exports"
+exclude_sensitive = true
+
+[embeddings]
+enabled = false
+model = "embeddinggemma-300m"
+dimensions = 256  # MRL truncation (768 full, 256 = best quality/storage ratio)
+
+[markdown]
+enabled = true
+output_path = "~/.claude/CLAUDE.md"

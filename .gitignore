@@ -1,0 +1,8 @@
+/target
+/data
+/queue
+/archive
+.env
+.claude/
+.agents/
+skills-lock.json
