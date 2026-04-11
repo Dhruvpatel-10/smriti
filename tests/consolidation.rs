@@ -1,8 +1,8 @@
 mod common;
 use common::{test_db, create_test_memory};
 
-use kb_server::db::memory as db_memory;
-use kb_server::types::*;
+use smriti::db::memory as db_memory;
+use smriti::types::*;
 
 #[tokio::test]
 async fn consolidation_creates_derives_edges() {
@@ -11,7 +11,7 @@ async fn consolidation_creates_derives_edges() {
     let a = create_test_memory(&db, "observation 1").await;
     let b = create_test_memory(&db, "observation 2").await;
 
-    use kb_server::tools::consolidate;
+    use smriti::tools::consolidate;
     let out = consolidate::execute(
         &db,
         consolidate::ConsolidateInput {

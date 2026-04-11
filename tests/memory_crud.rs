@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
-use kb_server::db::{client, memory};
-use kb_server::types::*;
+use smriti::db::{client, memory};
+use smriti::types::*;
 
 mod common;
 use common::{test_db, create_test_memory};

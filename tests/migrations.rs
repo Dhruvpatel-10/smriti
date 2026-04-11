@@ -4,7 +4,7 @@ use common::test_db;
 #[tokio::test]
 async fn migrations_are_recorded_and_idempotent() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::migrations;
+    use smriti::db::migrations;
 
     // Migrations already ran during connect(). Running again should be no-op.
     migrations::run(&db).await.unwrap();

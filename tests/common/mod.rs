@@ -3,12 +3,12 @@
 /// Not every test binary uses every helper — allow dead code to avoid
 /// per-binary unused warnings (see ADR-007: modular test architecture).
 #[allow(unused_imports)]
-use kb_server::db::memory as db_memory;
+use smriti::db::memory as db_memory;
 #[allow(unused_imports)]
-use kb_server::tools::remember;
+use smriti::tools::remember;
 
-use kb_server::db::client;
-use kb_server::types::*;
+use smriti::db::client;
+use smriti::types::*;
 
 /// Spin up a fresh embedded DB in a temp directory.
 ///

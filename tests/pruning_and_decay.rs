@@ -2,9 +2,9 @@ mod common;
 use common::{test_db, create_test_memory};
 
 use chrono::{Duration, Utc};
-use kb_server::db::{memory, prune};
-use kb_server::config::PruningConfig;
-use kb_server::types::*;
+use smriti::db::{memory, prune};
+use smriti::config::PruningConfig;
+use smriti::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PRUNING

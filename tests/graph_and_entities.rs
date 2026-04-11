@@ -1,8 +1,8 @@
 mod common;
 use common::{test_db, create_test_memory};
 
-use kb_server::db::{entity, graph, memory};
-use kb_server::types::*;
+use smriti::db::{entity, graph, memory};
+use smriti::types::*;
 use surrealdb::types::RecordId;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -62,7 +62,7 @@ async fn find_entities_no_match_returns_empty() {
 #[tokio::test]
 async fn entity_upsert_and_get() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::entity;
+    use smriti::db::entity;
 
     let id = entity::upsert(
         &db, "Jane Park", "person",
@@ -81,7 +81,7 @@ async fn entity_upsert_and_get() {
 #[tokio::test]
 async fn entity_upsert_is_idempotent() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::entity;
+    use smriti::db::entity;
 
     let id1 = entity::upsert(&db, "Alice", "person", vec![], serde_json::json!({}), None).await.unwrap();
     let id2 = entity::upsert(&db, "Alice", "person", vec!["engineer".into()], serde_json::json!({"team": "backend"}), Some("Updated context".into())).await.unwrap();
@@ -97,7 +97,7 @@ async fn entity_upsert_is_idempotent() {
 #[tokio::test]
 async fn entity_find_by_name() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::entity;
+    use smriti::db::entity;
 
     entity::upsert(&db, "Alice Johnson", "person", vec!["engineer".into()], serde_json::json!({}), None).await.unwrap();
     entity::upsert(&db, "Bob Smith", "person", vec!["designer".into()], serde_json::json!({}), None).await.unwrap();
@@ -114,7 +114,7 @@ async fn entity_find_by_name() {
 #[tokio::test]
 async fn entity_link_and_find_via_graph() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::entity;
+    use smriti::db::entity;
 
     let mem_id = create_test_memory(&db, "meeting with investor").await;
     graph::link_entity(&db, &mem_id, "Jane Investor").await.unwrap();

@@ -8,9 +8,9 @@ mod common;
 use common::test_db;
 
 use chrono::{Duration, Utc};
-use kb_server::config::AlertConfig;
-use kb_server::db::{alerts, consolidation, entity, graph, memory, search};
-use kb_server::types::*;
+use smriti::config::AlertConfig;
+use smriti::db::{alerts, consolidation, entity, graph, memory, search};
+use smriti::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RECALL VISIBILITY
@@ -348,7 +348,7 @@ async fn consolidation_candidates_hide_sensitive() {
 
 #[tokio::test]
 async fn path_safety_rejects_traversal() {
-    use kb_server::db::path_safety;
+    use smriti::db::path_safety;
 
     assert!(path_safety::safe_filename("../etc/passwd").is_err());
     assert!(path_safety::safe_filename("/etc/shadow").is_err());
@@ -447,7 +447,7 @@ async fn sm2_review_interval_capped_at_365() {
 
 #[tokio::test]
 async fn content_over_500kb_rejected() {
-    use kb_server::db::validation;
+    use smriti::db::validation;
 
     let huge = "x".repeat(500 * 1024 + 1);
     let result = validation::validate_content(Some(&huge));

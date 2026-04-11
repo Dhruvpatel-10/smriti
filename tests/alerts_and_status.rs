@@ -2,9 +2,9 @@ mod common;
 use common::test_db;
 
 use chrono::{Duration, Utc};
-use kb_server::db::{alerts, graph, memory, search};
-use kb_server::config::AlertConfig;
-use kb_server::types::*;
+use smriti::db::{alerts, graph, memory, search};
+use smriti::config::AlertConfig;
+use smriti::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STATUS QUERY
@@ -101,7 +101,7 @@ async fn alerts_detect_overdue_action_items() {
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();
     assert!(!alerts.is_empty(), "should detect overdue action item");
-    assert!(alerts.iter().any(|a| a.alert_type == kb_server::types::AlertType::OverdueActionItem));
+    assert!(alerts.iter().any(|a| a.alert_type == smriti::types::AlertType::OverdueActionItem));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,7 +134,7 @@ async fn contradiction_alert_detects_unsuperseded_updates() {
     let alerts = alerts::check_all(&db, &config).await.unwrap();
 
     assert!(
-        alerts.iter().any(|a| a.alert_type == kb_server::types::AlertType::Contradiction),
+        alerts.iter().any(|a| a.alert_type == smriti::types::AlertType::Contradiction),
         "should detect unsuperseded memory as potential contradiction"
     );
     assert!(
@@ -169,7 +169,7 @@ async fn no_contradiction_when_properly_superseded() {
     let alerts = alerts::check_all(&db, &config).await.unwrap();
 
     assert!(
-        !alerts.iter().any(|a| a.alert_type == kb_server::types::AlertType::Contradiction),
+        !alerts.iter().any(|a| a.alert_type == smriti::types::AlertType::Contradiction),
         "no contradiction alert when properly superseded"
     );
 }
@@ -203,7 +203,7 @@ async fn alerts_detect_expiring_memories() {
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();
     assert!(
-        alerts.iter().any(|a| a.alert_type == kb_server::types::AlertType::ExpiringMemory),
+        alerts.iter().any(|a| a.alert_type == smriti::types::AlertType::ExpiringMemory),
         "should detect memory expiring within 24h"
     );
 }
@@ -229,7 +229,7 @@ async fn alerts_ignores_memories_expiring_beyond_window() {
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();
     assert!(
-        !alerts.iter().any(|a| a.alert_type == kb_server::types::AlertType::ExpiringMemory),
+        !alerts.iter().any(|a| a.alert_type == smriti::types::AlertType::ExpiringMemory),
         "should NOT alert for memories expiring beyond window"
     );
 }

@@ -4,7 +4,7 @@ use common::{test_db, create_test_memory};
 #[tokio::test]
 async fn export_and_import_roundtrip() {
     let (db, _dir) = test_db().await;
-    use kb_server::db::export;
+    use smriti::db::export;
 
     let _id1 = create_test_memory(&db, "memory one").await;
     let _id2 = create_test_memory(&db, "memory two").await;

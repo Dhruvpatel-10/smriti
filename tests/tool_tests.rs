@@ -1,8 +1,8 @@
 use chrono::{Duration, Utc};
-use kb_server::config::AlertConfig;
-use kb_server::tools::{alerts, consolidate, drill, entity, forget, link, promote, recall,
+use smriti::config::AlertConfig;
+use smriti::tools::{alerts, consolidate, drill, entity, forget, link, promote, recall,
                        recall_at, remember, status};
-use kb_server::types::{AlertType, *};
+use smriti::types::{AlertType, *};
 
 mod common;
 use common::test_db;

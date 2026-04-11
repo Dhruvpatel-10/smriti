@@ -2,8 +2,8 @@ mod common;
 use common::{test_db, create_test_memory};
 
 use chrono::{Duration, Utc};
-use kb_server::db::{graph, memory, search};
-use kb_server::types::*;
+use smriti::db::{graph, memory, search};
+use smriti::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SEARCH / RECALL
