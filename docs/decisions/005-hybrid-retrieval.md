@@ -1,6 +1,6 @@
 # ADR-005: Hybrid Retrieval with RRF, Spreading Activation, and Lost-in-Middle Ordering
 
-**Status:** Accepted  
+**Status:** Superseded by ADR-022 (adaptive reranker policy) and ADR-023 (weighted spreading activation) — 2026-04-30. Hybrid pipeline shape preserved; stage internals updated.
 **Date:** 2026-04-10  
 **Context:** Single-signal retrieval (BM25 alone or vector alone) misses relevant results. BM25 excels at keyword match but misses semantic similarity. Vector search captures meaning but loses exact term matches. Research (Zep, MemGPT, Microsoft GraphRAG) consistently shows hybrid outperforms either alone.
 

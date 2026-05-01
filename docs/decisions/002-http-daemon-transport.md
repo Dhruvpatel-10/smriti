@@ -6,7 +6,7 @@
 
 ## Decision
 
-Add HTTP Streamable transport as an alternative to stdio. One long-running daemon serves all sessions via `127.0.0.1:3001`.
+Add HTTP Streamable transport as an alternative to stdio. One long-running daemon serves all sessions via `127.0.0.1:47821`.
 
 ## Implementation
 
@@ -29,5 +29,5 @@ Add HTTP Streamable transport as an alternative to stdio. One long-running daemo
 
 ## Consequences
 
-- `~/.claude/settings.json` points to `http://127.0.0.1:3001/mcp` in daemon mode.
+- `~/.claude/settings.json` points to `http://127.0.0.1:47821/mcp` in daemon mode.
 - stdio mode remains for single-session dev/testing.

@@ -40,6 +40,9 @@ The server enforces data quality regardless of how smart the calling LLM is:
 - Supersession verification (old memory must exist and be active)
 
 **Layer 2 — Embeddings** (async, ~10-50ms):
+- `Embedder` trait (`src/db/embeddings/traits.rs`) — `Arc<dyn Embedder>` everywhere; `build_embedder(cfg)` factory selects backend. Methods: `embed_query`, `embed_document`, `embed_document_chunks`, `fingerprint`, `dimensions`, `max_input_tokens`, `max_chunks_per_doc`, `recommended_chunk_tokens`.
+- `LocalEmbedder` (fastembed): 384-dim, 512 max tokens, 1 max chunk/doc, 350 recommended chunk tokens.
+- `VoyageEmbedder` (voyage-context-3): 1024-dim, 32K max tokens, 1000 max chunks/doc, 800 recommended. Uses `/v1/contextualizedembeddings` exclusively.
 - Contextual embedding: prepend `[type/subtype] [project] [domains]` before encoding
 - Auto-dedup at write time (cosine >0.92 reject, >0.82 warn)
 - Auto-link via embedding similarity (0.75 relates, 0.90 extends, 0.85 cross-domain)
@@ -54,9 +57,13 @@ The server enforces data quality regardless of how smart the calling LLM is:
 ## Write Path (Embed-First, Create-Last)
 
 ```
+0. AGENT RESOLVE  — if source_agent set: lookup agent by name → reject if archived
+                    inherit agent's project when memory omits project
+                    agent-authored working/* subtypes default to visibility=Private
 1. VALIDATE       — summary gate, type/subtype resolution, importance bounds
 2. EMBED          — contextual embedding prepend, generate vector
-3. DEDUP CHECK    — cosine similarity against existing memories
+3. DEDUP CHECK    — cosine similarity against existing memories, scoped per-author
+                    (same-author only; cross-author near-duplicates get relates edge)
                     >0.92 → REJECT (return existing memory ID, nothing created)
                     >0.82 → WARN (store but flag in response)
 4. CREATE         — write memory to SurrealDB
@@ -67,25 +74,90 @@ The server enforces data quality regardless of how smart the calling LLM is:
    (d) Verify + execute supersession (if updates_id provided)
    (e) Auto-link similar memories (uses pre-computed vector, no re-embedding)
    (f) Entity name matching in summary (whole-word boundary)
-   (g) Chunk long content for fine-grained vector search
+   (g) Chunk long content — token-budget driven recursive splitter; collect-then-batch via `embed_document_chunks` (single batched call to Voyage; N independent calls for local). Local path prepends structural prefix per chunk before embedding. Chunks stored as separate memory rows, linked to parent via `chunk RELATE extends parent`.
 ```
 
-## Retrieval Pipeline (5 stages)
+## Bitemporal Model
+
+Every memory carries four timestamps mapping to the Graphiti model:
+
+| Graphiti | smriti field | Meaning |
+|---|---|---|
+| t_valid   | `event_at` (existing) | When the fact became true |
+| t_invalid | `valid_until` (nullable) | When the fact became false; NULL = still true |
+| t_created | `created_at` (existing) | When it was stored in DB |
+| t_expired | `invalidated_at` (nullable) | When we stopped believing it (retraction, supersession, TTL, forget) |
+
+`invalidated_at` is the authoritative archival signal. `status` is a derived index hint kept in sync: `status='archived'` iff `invalidated_at IS NOT NULL`.
+
+The canonical active-memory predicate (`BITEMPORAL_ACTIVE` constant in `src/db/mod.rs`) applied at every read site:
+
+```sql
+WHERE invalidated_at IS NONE
+  AND (valid_until IS NONE OR valid_until > time::now())
+```
+
+**Phase 2 follow-ups (not yet implemented):**
+- SM-2 decay does not yet accelerate for memories with `valid_until` in the past.
+- `kb_remember` does not yet expose `valid_until` to callers.
+
+## Retrieval Pipeline (5+ stages)
 
 ```
-1. BM25 full-text search (always runs)
+1. BM25 full-text search (always runs) — searches summary | content | anchor_entities
 2. Vector cosine similarity (if embeddings enabled, relevance floor cosine ≥ 0.30)
-3. RRF fusion (always balanced, k=60 — no intent-based boosting)
+3. Fusion — RRF (default, k=60) or Convex Combination (α·norm_vec + (1-α)·norm_bm25,
+   configurable via [search.fusion]). RRF: no intent-based boosting. Convex Combination:
+   min-max normalisation per query; vector_weight default 0.7; min_score filter default 0.0.
+   BM25 raw score surfaced as `_bm25_score` via `search::score(0)`; vector raw score as `_vscore`.
+3.5 Adaptive Rerank (ADR-022) — `RerankerPolicy` enum: `Always | Adaptive (default) | Never`.
+   `should_rerank()` applies per-query heuristics: skip if RRF top-1 dominant (rrf[0] > 2·rrf[1]),
+   skip Working type, skip short query (≤3 words); force if person filter active or Semantic type
+   or long query (>6 words). Optional `rerank: bool` param on `kb_recall` overrides the policy.
+   `recall_at` uses fixed Adaptive (no caller override). Voyage `rerank-2.5-lite` cross-encoder
+   reranks the pool (top_k_input, default 50); soft-fail on outage (RRF order passed through).
+   Tracing emitted at `target: "rerank.decision"`. Reduces Voyage rerank API calls ~40% at
+   fixed quality (calibration pending ADR-021 eval set). (ADR-017, ADR-022)
 4. Entity-anchored person filter (if person specified — start from entity edges, not post-hoc)
-5. Spreading activation (1-hop via extends/derives/relates/involves, cap 3 results)
+5. Weighted Spreading Activation (ADR-023) — 1-hop via typed edges with per-edge-type weights:
+   derives=1.0, extends=0.8, updates=0.8, relates=0.5, involves=0.3,
+   typed_relation=confidence×0.9. Hop decay: 0.5^hop_depth. Cap and all weights configurable
+   via `[search.spreading]` and `[search.spreading.edge_weights]` in config.toml.
 → Access count update for ALL returned memories
 → SM-2 schedule update for BM25 rows
 ```
+
+All five stages apply the `BITEMPORAL_ACTIVE` predicate — no ghost facts enter the pipeline regardless of stage.
+
+The retrieval pipeline is fully config-driven: fusion strategy, reranker policy, spreading activation cap, hop decay, and all six edge-type weights are tunable without code changes. See `docs/config.md` for the `[search.*]` config blocks. Evaluation quality is tracked via the graded-relevance oracle (ADR-021): nDCG@K, MRR@K, Recall@K metrics emitted per probe and in aggregate from `bench/`.
+
+`author_filter` is an indexed field predicate applied before all stages (BM25 candidates,
+vector candidates, entity-anchored intersection, and spreading-activation sources are all
+constrained by the same predicate):
+
+| `author_filter` | Predicate |
+|---|---|
+| `"me"` | `WHERE author IS NULL` |
+| `"<name>"` | `WHERE author = <agent_id>` |
+| omitted | no author predicate |
 
 Design decisions (post-DA review):
 - No intent routing — always balanced hybrid. RRF already handles weak sources.
 - No lost-in-middle reordering — belongs in the calling client, not the data layer.
 - Entity-anchored queries get 2x BM25 fetch to ensure enough candidates for intersection.
+
+### kb_recall_at correctness (bitemporal fix)
+
+`kb_recall_at(query, as_of)` answers "what did I know at point-in-time `as_of`?" using four clauses:
+
+```sql
+WHERE event_at      <= $as_of
+  AND (valid_until   IS NULL OR valid_until   > $as_of)
+  AND created_at    <= $as_of
+  AND (invalidated_at IS NULL OR invalidated_at > $as_of)
+```
+
+Before ADR-011, only `event_at <= $as_of` was checked — superseded facts were returned even when they had been invalidated before the as_of date.
 
 ## Multi-Agent Design
 
@@ -96,10 +168,101 @@ Multiple agents across different projects write to the same knowledge base:
 - **Source provenance** tracks which agent/session created each memory
 - **Contradiction detection** happens in drain session, not at write time
 
-## LLM Integration (Rig Framework)
+## LLM Sidecar (Typed-Relation Extraction)
 
-- **Primary:** Google Gemini 2.0 Flash (free tier, 1500 req/day)
-- **Fallback:** Groq Llama 3.1 70B (burst overflow)
-- **Framework:** rig-core 0.34 (Rust LLM framework)
-- **Embeddings:** fastembed (local ONNX, EmbeddingGemma-300M, 256-dim MRL truncation)
-- LLM is NEVER on the hot path — only used in background drain session
+**Supersedes:** ADR-008 §1 (Rig/Gemini/Groq). See ADR-013 for design rationale.
+
+### Module layout
+
+- `src/llm/sidecar.rs` — `SidecarClient`; spawns and supervises the Node.js child process.
+- `src/llm/extractor.rs` — `extract_and_persist`; validates sidecar output and writes `typed_relation` edges.
+- `src/llm/mod.rs` — module root; re-exports `extract_and_persist`, `SidecarClient`, `ExtractStats`.
+- `sidecar/src/index.ts` — TypeScript JSON-RPC 2.0 server; calls `@anthropic-ai/claude-agent-sdk`.
+- `sidecar/dist/index.js` — compiled artifact; path configured via `llm.sidecar_path`.
+
+### Wire protocol
+
+JSON-RPC 2.0 over stdin/stdout, newline-delimited. Rust writes one JSON object per line to the
+child's stdin; reads one JSON object per line from its stdout. Sidecar stderr is drained to
+`tracing::warn` (never touches stdout, which is reserved for the MCP protocol).
+
+### Auth model
+
+`ANTHROPIC_API_KEY` is stripped at both layers so the bundled Claude Code OAuth session
+(Max subscription) is used instead of billing an API key:
+
+- Rust: `Command::env_remove("ANTHROPIC_API_KEY")` before `spawn()` (`src/llm/sidecar.rs`).
+- TypeScript: `delete process.env.ANTHROPIC_API_KEY` at process entry (`sidecar/src/index.ts`).
+
+### Supervisor and circuit breaker
+
+`supervisor_loop` in `src/llm/sidecar.rs` owns the child process lifecycle:
+
+- Exponential backoff on restart: 1 s, 2 s, 4 s … capped at 60 s.
+- `max_consecutive_failures` (default 5) → circuit open → state transitions to `Broken`.
+- Recovery probe: 30 s sleep, then one restart attempt; resets `consecutive_failures` to 0 on success.
+- In-flight requests at time of child death receive `RpcError::SidecarRestarted`.
+
+### Methods
+
+- `health` — liveness probe; returns `{ok: bool, version: string}`.
+- `extract_relations` — accepts `{memory_id, summary, content?, project?, domain?}`; returns
+  `{relations: [{from, to, kind, confidence}]}`. Response shape is enforced by the SDK's
+  `outputFormat: { type: "json_schema" }` — no free-form JSON parsing.
+- `extract_anchors` — accepts `{memory_id, summary, project?, domain?}`; returns
+  `{anchors: [string]}` (0–3 items). Extracts proper nouns, project names, technology names,
+  and event names as raw text (no normalisation — the BM25 analyzer handles that). Budget:
+  `maxBudgetUsd: 0.02`, 15 s `AbortController`. Content is never included (same injection
+  defense as `extract_relations`). Added with ADR-014.
+- `synthesize_consolidation` — accepts `{cluster_id, summaries: [string], subtype, project?,
+  domain?}`; returns `{should_merge: bool, confidence: float, merged_summary?: string,
+  reason: string}`. Used by the auto-consolidation periodic loop (ADR-026). Budget:
+  `maxBudgetUsd: 0.05`, 30 s `AbortController`. Summary-only (no content). Sensitive memories
+  are rejected before this call by `fetch_source_metadata`.
+
+### Write path integration
+
+Post-create async spawn in `src/tools/remember.rs` calls both `crate::llm::extract_and_persist`
+and `crate::llm::extract_anchors_and_persist` concurrently after `memory::create` returns.
+Both spawns are fire-and-forget inside `TaskRegistry` tasks:
+
+- Sensitive memories (`Visibility::Sensitive`) are skipped by both — never sent to the LLM.
+- Only the summary is sent; content is never included (prompt-injection defense baseline).
+- `extract_and_persist` validates: `from` matches submitted memory ID, confidence ≥ threshold,
+  `kind` parses to `RelationKind` enum, target memory exists. Failures are counted in
+  `ExtractStats` and logged; they do not surface to the caller.
+- Passing edges are written to the `typed_relation` edge table (MIGRATION_012) with a
+  `confidence` field and `extractor_version` for future re-extraction.
+- `extract_anchors_and_persist` writes up to 3 entity strings to `memory.anchor_entities`
+  (MIGRATION_014). NULL until populated — the base BM25 + vector path is unaffected during
+  the async window.
+
+### Read path integration
+
+`src/db/search.rs::spreading_activation` traverses `typed_relation` neighbors during retrieval
+stage 5. Filter predicate: `retracted_at IS NONE AND confidence >= 0.5`. Retracted or
+low-confidence edges are invisible to spreading activation.
+
+### Auto-consolidation (ADR-026)
+
+When `[consolidation].auto_enabled = true`, the 24h periodic loop (every
+`consolidation_interval_hours`) calls `synthesize_consolidation` on each candidate
+cluster via a **second `SidecarClient` instance** — isolated from the
+`extract_relations`/`extract_anchors` hot path so a consolidation circuit-breaker trip
+does not disable write-time extraction. The sidecar returns `{should_merge, confidence,
+merged_summary?, reason}`; a merge proceeds only when `should_merge = true && confidence
+>= min_confidence` (default 0.75). Every attempt is recorded in the
+`consolidation_attempt` ledger (migration 018) with a `cooldown_days` fence against
+re-evaluation. Per-author scoping (`find_candidates` GROUP BY `author`) prevents
+cross-tenant merges on the shared daemon (ADR-002). Default: `auto_enabled = false`.
+See ADR-026 for full rationale, config knobs, and pilot plan.
+
+### Kill switch
+
+Set `llm.enabled = false` in `config.toml` (default). The sidecar process is never spawned;
+`KbServer` holds `Option<Arc<SidecarClient>>` and skips extraction silently. Existing
+`typed_relation` edges in the DB remain intact and continue to function in spreading activation.
+
+### Embeddings
+
+Embedder backend is selected by `embeddings.provider` in `config.toml` (`local` or `voyage`). Both implement the `Embedder` trait (`src/db/embeddings/traits.rs`). Local default: fastembed ONNX, 384-dim, no network. Voyage: voyage-context-3, 1024-dim Matryoshka, `/v1/contextualizedembeddings` exclusively, paid-tier privacy gate (ADR-016). Fingerprint (`provider/model/dim`) is verified at startup against `_kb_metadata` (Migration 015) — mismatch refuses start. Set `SMRITI_FORCE_REEMBED_ON_START=1` to bypass once (run `kb_reembed` immediately after).

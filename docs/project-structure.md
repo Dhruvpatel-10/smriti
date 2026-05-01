@@ -28,7 +28,18 @@ smriti/
 |   |   +-- entity.rs            <- CRUD for flexible entities
 |   |   +-- graph.rs             <- RELATE operations (involves, assigned, updates, extends, derives, relates)
 |   |   +-- search.rs            <- hybrid retrieval: BM25 + vector RRF + spreading activation (5 stages)
-|   |   +-- embeddings.rs        <- LocalEmbedder: in-process ONNX via fastembed
+|   |   +-- embeddings/          <- Embedder trait + backends
+|   |   |   +-- mod.rs           <- re-exports + factory
+|   |   |   +-- traits.rs        <- Embedder trait, EmbedderFingerprint
+|   |   |   +-- factory.rs       <- config → Arc<dyn Embedder>
+|   |   |   +-- fingerprint.rs   <- _kb_metadata startup gate; SMRITI_FORCE_REEMBED_ON_START
+|   |   |   +-- local.rs         <- LocalEmbedder (fastembed ONNX, 384-dim)
+|   |   |   +-- store.rs         <- store_vector helper
+|   |   |   +-- voyage/          <- VoyageEmbedder (voyage-context-3, 1024-dim)
+|   |   |       +-- mod.rs
+|   |   |       +-- client.rs
+|   |   |       +-- contextualized.rs  <- /v1/contextualizedembeddings
+|   |   |       +-- wire.rs            <- request/response types
 |   |   +-- validation.rs        <- write-path intelligence: inference, importance, TTL, summary gate, contextual embedding
 |   |   +-- dedup.rs             <- cosine similarity dedup (0.92 reject, 0.82 warn)
 |   |   +-- auto_link.rs         <- embedding similarity (0.75/0.90) + whole-word entity matching
@@ -36,7 +47,8 @@ smriti/
 |   |   +-- alerts.rs            <- overdue items, stale contacts, expiring memories, contradictions
 |   |   +-- export.rs            <- backup JSONL export/import
 |   |   +-- markdown.rs          <- Layer 1 markdown generation (~/.claude/CLAUDE.md)
-|   |   +-- consolidation.rs     <- consolidation candidate detection
+|   |   +-- consolidation.rs     <- consolidation candidate detection + consolidate_atomic
+|   |   +-- consolidation_ledger.rs <- auto-consolidation attempt ledger (migration 018, ADR-026)
 |   |   +-- chunking.rs          <- content chunking for long documents + vector search
 |   |   +-- reembed.rs           <- re-embedding migration (model/dim changes)
 |   +-- tools/
@@ -45,38 +57,41 @@ smriti/
 |   |   +-- recall.rs            <- kb_recall handler
 |   |   +-- recall_at.rs         <- kb_recall_at handler
 |   |   +-- drill.rs             <- kb_drill handler
-|   |   +-- forget.rs            <- kb_forget handler
+|   |   +-- archive.rs           <- kb_archive handler (reason=forget|retract; replaces kb_forget+kb_retract)
 |   |   +-- promote.rs           <- kb_promote handler
 |   |   +-- queue.rs             <- kb_queue handler
 |   |   +-- status.rs            <- kb_status handler
+|   |   +-- profile.rs           <- kb_profile handler
 |   |   +-- link.rs              <- kb_link handler
 |   |   +-- consolidate.rs       <- kb_consolidate handler
-|   |   +-- entity.rs            <- kb_entity_* handlers
+|   |   +-- entity.rs            <- kb_entity_upsert/find/get handlers
+|   |   +-- entity_delete.rs     <- kb_entity_delete handler
+|   |   +-- relation_retract.rs  <- kb_relation_retract handler
 |   |   +-- export.rs            <- kb_export/kb_import handlers
 |   |   +-- alerts.rs            <- kb_alerts handler
+|   |   +-- agent.rs             <- kb_agent_register/retire/query handlers
 |   +-- llm/
-|   |   +-- mod.rs               <- LLM module
-|   |   +-- client.rs            <- Gemini primary + Groq fallback (from env vars)
-|   |   +-- classify.rs          <- LLM-based memory reclassification
-+-- tests/                       <- 177 tests (70 unit + 107 integration)
+|   |   +-- mod.rs               <- LLM module; re-exports extract_and_persist, SidecarClient, ExtractStats
+|   |   +-- sidecar.rs           <- SidecarClient; supervisor loop; circuit breaker; JSON-RPC 2.0
+|   |   +-- extractor.rs         <- extract_and_persist + extract_anchors_and_persist; validates + writes typed_relation / anchor_entities
++-- tests/                       <- extensive test suite (2 ignored: voyage integration, key-gated; 5 ignored sidecar integration)
 |   +-- common/mod.rs            <- shared helpers: test_db(), create_test_memory(), remember_input()
-|   +-- memory_crud.rs           <- 17 tests: CRUD, TTL, promote, schema idempotency
-|   +-- search_retrieval.rs      <- 17 tests: recall, filters, vector, RRF, spreading activation
-|   +-- graph_and_entities.rs    <- 10 tests: edges, entity CRUD, idempotency
-|   +-- pruning_and_decay.rs     <-  9 tests: TTL expiry, SM-2 decay, immunity, legacy fallback
-|   +-- alerts_and_status.rs     <-  8 tests: overdue, expiring, contradictions, status
-|   +-- tool_tests.rs            <- 35 tests: all MCP tool handlers
-|   +-- queue_tests.rs           <-  8 tests: queue file I/O
-|   +-- consolidation.rs         <-  1 test: merge + derives provenance
-|   +-- export_import.rs         <-  1 test: JSONL roundtrip
-|   +-- migrations.rs            <-  1 test: schema version tracking
+|   +-- memory_crud.rs           <- CRUD, TTL, promote, schema idempotency
+|   +-- search_retrieval.rs      <- recall, filters, vector, RRF, spreading activation
+|   +-- graph_and_entities.rs    <- edges, entity CRUD, idempotency
+|   +-- pruning_and_decay.rs     <- TTL expiry, SM-2 decay, immunity, legacy fallback
+|   +-- alerts_and_status.rs     <- overdue, expiring, contradictions, status
+|   +-- tool_tests.rs            <- MCP tool handlers
+|   +-- consolidation.rs         <- merge + derives provenance; consolidation_ledger; auto-consolidation unit tests
+|   +-- export_import.rs         <- JSONL roundtrip
+|   +-- migrations.rs            <- schema version tracking
 +-- docs/
 |   +-- architecture.md          <- two-layer storage, server intelligence, write/retrieval pipelines
 |   +-- data-model.md            <- entities, graph, visibility, decay, importance
 |   +-- config.md                <- config.toml reference + env vars + MCP connection
 |   +-- surrealdb-v3.md          <- SurrealDB v3 gotchas and dev notes
 |   +-- project-structure.md     <- this file
-|   +-- decisions/               <- Architecture Decision Records (ADR-001 through ADR-008)
+|   +-- decisions/               <- Architecture Decision Records (ADR-001 through ADR-026)
 +-- data/                        <- SurrealDB SurrealKV files (gitignored)
 +-- queue/                       <- instruction queue (gitignored)
 +-- archive/                     <- raw source material + exports (gitignored)

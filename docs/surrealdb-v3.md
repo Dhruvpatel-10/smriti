@@ -14,6 +14,7 @@ Dev reference for SurrealDB v3 gotchas encountered during development.
 - `IF/ELSE` uses curly-brace blocks `{ }`, not `THEN...END`
 - `SELECT *, field AS alias` RENAMES the field — never alias fields you need to keep
 - Graph traversal filters: `table[WHERE condition]`
+- `value` is a **reserved keyword** (used in `SELECT VALUE` clause) — fields named `value` must be backtick-quoted: `` SELECT `value` FROM _kb_metadata `` and `` UPSERT _kb_metadata MERGE { ..., `value`: $value, ... } ``. The underscore-prefixed table name (`_kb_metadata`) is fine unquoted.
 
 ## Binding
 - Bind `DateTime<Utc>` directly — `serde_json::to_value()` produces strings v3 won't coerce
@@ -35,3 +36,14 @@ Dev reference for SurrealDB v3 gotchas encountered during development.
 - Defined in `src/db/migrations.rs`, versioned numbered migrations
 - Idempotent with `IF NOT EXISTS`
 - Never edit existing migrations — add new ones
+
+## Known Function Gaps
+
+- `array::group` is NOT available in SurrealKV embedded mode. The consolidation
+  candidate heuristic-2 (graph-cluster detection) was rewritten to avoid it — uses
+  explicit graph traversal with `->relates->` rather than a grouped aggregate. Do not
+  use `array::group` anywhere in query code; it will silently return no rows or error.
+
+- `HAVING` clause behaviour: SurrealDB v3 `HAVING` may not correctly filter on
+  computed aggregate aliases in all contexts. Prefer `WHERE` on sub-selects or
+  post-processing in Rust when filtering on aggregated values.

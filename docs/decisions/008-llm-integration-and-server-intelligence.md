@@ -1,6 +1,6 @@
 # ADR-008: LLM Integration, Server-Side Intelligence, and Taxonomy Refinement
 
-**Status:** Accepted + Amended  
+**Status:** Superseded by ADR-013 (Claude Agent SDK sidecar — see decisions/013-claude-agent-sdk-sidecar.md)  
 **Date:** 2026-04-10  
 **Amended:** 2026-04-10 (post-DA review — see Amendment section below)  
 **Context:** Deep review of taxonomy, retrieval, graph, and decay against cognitive science and all major competitors (MemGPT/Letta, Zep/Graphiti, Mem0, Cognee, SuperMemory, LangMem). Devil's advocate review by simulated PhD memory systems expert.
@@ -277,3 +277,24 @@ No mechanism to detect or correct misclassified memories.
 - ACT-R activation model (SM-2 with domain-aware rates is adequate for v1)
 - Automatic summarization tiers (deferred to consolidation)
 - Query decomposition (single queries are sufficient for personal use)
+
+---
+
+## Superseded
+
+**Date superseded:** 2026-04-29  
+**Superseded by:** ADR-013 (decisions/013-claude-agent-sdk-sidecar.md)
+
+The rig-core direct integration described in Section 1 of this ADR was removed in v0.3.4. The
+`src/llm/` module (mod.rs, client.rs, classify.rs) and the `rig-core` Cargo dependency have been
+deleted. The Rig/Gemini/Groq provider strategy, drain loop, and background LLM pipeline were never
+fully wired into production paths and had zero external callers.
+
+The replacement approach (ADR-013) uses a TypeScript Claude Agent SDK sidecar process. This
+leverages the user's existing Claude Max plan, eliminates API key management for a separate
+provider, and keeps the Rust server free of LLM runtime dependencies. The Rust MCP server continues
+to handle all storage, retrieval, validation, and embedding (fastembed, local ONNX) — LLM reasoning
+is delegated entirely to the sidecar.
+
+Sections 2–9 of this ADR remain valid as historical context for the taxonomy, write-path, retrieval,
+and decay decisions that were implemented in Rust and are unaffected by the provider change.
