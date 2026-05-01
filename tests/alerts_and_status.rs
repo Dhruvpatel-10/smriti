@@ -14,23 +14,19 @@ use smriti::types::*;
 async fn status_returns_action_items_and_decisions() {
     let (db, _dir) = test_db().await;
 
-    memory::create(
-        &db, "Ship feature X by Friday".into(), None,
-        MemoryType::Prospective, MemorySubtype::ActionItem, Source::Manual,
-        Some("proj-a".into()), vec![], vec![], Importance::new(4).unwrap(), Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("Ship feature X by Friday".into(), MemoryType::Prospective, MemorySubtype::ActionItem, Some(Channel::Cli), Some(Modality::Text))
+            .project("proj-a".into())
+            .importance(Importance::new(4).unwrap())).await.unwrap();
 
-    memory::create(
-        &db, "Use Rust for backend".into(), None,
-        MemoryType::Semantic, MemorySubtype::Decision, Source::Manual,
-        Some("proj-a".into()), vec![], vec![], Importance::new(5).unwrap(), Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("Use Rust for backend".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))
+            .project("proj-a".into())
+            .importance(Importance::new(5).unwrap())).await.unwrap();
 
-    memory::create(
-        &db, "Should we support multi-tenant?".into(), None,
-        MemoryType::Working, MemorySubtype::OpenQuestion, Source::Manual,
-        Some("proj-a".into()), vec![], vec![], Importance::default(), Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("Should we support multi-tenant?".into(), MemoryType::Working, MemorySubtype::OpenQuestion, Some(Channel::Cli), Some(Modality::Text))
+            .project("proj-a".into())).await.unwrap();
 
     let status = search::status_query(&db, Some("proj-a"), None).await.unwrap();
     assert_eq!(status.open_action_items.len(), 1);
@@ -46,17 +42,13 @@ async fn status_returns_action_items_and_decisions() {
 async fn status_filters_by_project() {
     let (db, _dir) = test_db().await;
 
-    memory::create(
-        &db, "proj A item".into(), None,
-        MemoryType::Prospective, MemorySubtype::ActionItem, Source::Manual,
-        Some("proj-a".into()), vec![], vec![], Importance::default(), Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("proj A item".into(), MemoryType::Prospective, MemorySubtype::ActionItem, Some(Channel::Cli), Some(Modality::Text))
+            .project("proj-a".into())).await.unwrap();
 
-    memory::create(
-        &db, "proj B item".into(), None,
-        MemoryType::Prospective, MemorySubtype::ActionItem, Source::Manual,
-        Some("proj-b".into()), vec![], vec![], Importance::default(), Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("proj B item".into(), MemoryType::Prospective, MemorySubtype::ActionItem, Some(Channel::Cli), Some(Modality::Text))
+            .project("proj-b".into())).await.unwrap();
 
     let status = search::status_query(&db, Some("proj-a"), None).await.unwrap();
     assert_eq!(status.open_action_items.len(), 1);
@@ -84,19 +76,15 @@ async fn alerts_detect_overdue_action_items() {
     let (db, _dir) = test_db().await;
 
     // Create an action item with event_at 3 days ago
-    memory::create(
-        &db, "Ship feature X".into(), None,
-        MemoryType::Prospective, MemorySubtype::ActionItem, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(),
-        Some(Utc::now() - Duration::days(3)),
-        vec![], None, None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("Ship feature X".into(), MemoryType::Prospective, MemorySubtype::ActionItem, Some(Channel::Cli), Some(Modality::Text))
+            .event_at(Utc::now() - Duration::days(3))).await.unwrap();
 
     let config = AlertConfig {
         overdue_action_item_days: 1,
         stale_contact_days: 14,
         expiring_memory_hours: 24,
+        extraction_backlog_threshold: 50,
     };
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();
@@ -113,19 +101,11 @@ async fn contradiction_alert_detects_unsuperseded_updates() {
     let (db, _dir) = test_db().await;
 
     // Create old memory and new memory with updates edge, but DON'T supersede
-    let old_id = memory::create(
-        &db, "We will use Postgres".into(), None,
-        MemoryType::Semantic, MemorySubtype::Decision, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let old_id = memory::create(&db,
+        memory::MemoryDraft::new("We will use Postgres".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
-    let new_id = memory::create(
-        &db, "We will use SurrealDB".into(), None,
-        MemoryType::Semantic, MemorySubtype::Decision, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let new_id = memory::create(&db,
+        memory::MemoryDraft::new("We will use SurrealDB".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
     // Create the updates edge (new updates old) but DON'T call supersede
     graph::link_memories(&db, &new_id, &old_id, RelationType::Updates).await.unwrap();
@@ -138,7 +118,7 @@ async fn contradiction_alert_detects_unsuperseded_updates() {
         "should detect unsuperseded memory as potential contradiction"
     );
     assert!(
-        alerts.iter().any(|a| a.reference_id == old_id.as_str()),
+        alerts.iter().any(|a| a.reference.as_str() == old_id.as_str()),
         "alert should reference the OLD (unsuperseded) memory"
     );
 }
@@ -147,23 +127,15 @@ async fn contradiction_alert_detects_unsuperseded_updates() {
 async fn no_contradiction_when_properly_superseded() {
     let (db, _dir) = test_db().await;
 
-    let old_id = memory::create(
-        &db, "Old decision".into(), None,
-        MemoryType::Semantic, MemorySubtype::Decision, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let old_id = memory::create(&db,
+        memory::MemoryDraft::new("Old decision".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
-    let new_id = memory::create(
-        &db, "New decision".into(), None,
-        MemoryType::Semantic, MemorySubtype::Decision, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let new_id = memory::create(&db,
+        memory::MemoryDraft::new("New decision".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
     // Properly supersede: edge + status change
     graph::link_memories(&db, &new_id, &old_id, RelationType::Updates).await.unwrap();
-    memory::supersede(&db, &old_id).await.unwrap();
+    memory::supersede(&db, &old_id, Utc::now()).await.unwrap();
 
     let config = AlertConfig::default();
     let alerts = alerts::check_all(&db, &config).await.unwrap();
@@ -183,12 +155,8 @@ async fn alerts_detect_expiring_memories() {
     let (db, _dir) = test_db().await;
 
     // Create a scratch memory (48h TTL) and manually set expires_at to soon
-    let id = memory::create(
-        &db, "scratch note about to expire".into(), None,
-        MemoryType::Working, MemorySubtype::Scratch, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("scratch note about to expire".into(), MemoryType::Working, MemorySubtype::Scratch, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
     // Set expires_at to 6 hours from now (within 24h alert window)
     db.query("UPDATE type::record('memory', $id) SET expires_at = time::now() + 6h")
@@ -199,6 +167,7 @@ async fn alerts_detect_expiring_memories() {
         overdue_action_item_days: 1,
         stale_contact_days: 14,
         expiring_memory_hours: 24,
+        extraction_backlog_threshold: 50,
     };
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();
@@ -212,19 +181,15 @@ async fn alerts_detect_expiring_memories() {
 async fn alerts_ignores_memories_expiring_beyond_window() {
     let (db, _dir) = test_db().await;
 
-    memory::create(
-        &db, "not expiring soon".into(), None,
-        MemoryType::Working, MemorySubtype::Priority, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![],
-        Some(Utc::now() + Duration::days(5)), // expires in 5 days
-        None, None,
-    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("not expiring soon".into(), MemoryType::Working, MemorySubtype::Priority, Some(Channel::Cli), Some(Modality::Text))
+            .expires_at(Utc::now() + Duration::days(5))).await.unwrap();
 
     let config = AlertConfig {
         overdue_action_item_days: 1,
         stale_contact_days: 14,
         expiring_memory_hours: 24,
+        extraction_backlog_threshold: 50,
     };
 
     let alerts = alerts::check_all(&db, &config).await.unwrap();

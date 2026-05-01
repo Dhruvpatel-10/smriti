@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use smriti::config::AlertConfig;
-use smriti::tools::{alerts, consolidate, drill, entity, forget, link, promote, recall,
+use smriti::shutdown::TaskRegistry;
+use smriti::tools::{alerts, archive, consolidate, drill, entity, link, promote, recall,
                        recall_at, remember, status};
-use smriti::types::{AlertType, *};
+use smriti::types::{AlertType, EntityKind, *};
 
 mod common;
 use common::test_db;
@@ -18,7 +21,8 @@ fn remember_input(summary: &str, typ: MemoryType, sub: MemorySubtype) -> remembe
         summary: padded,
         memory_type: typ,
         subtype: sub,
-        source: Source::Manual,
+        channel: Some(Channel::Cli),
+        modality: Some(Modality::Text),
         content: None,
         project: None,
         domain: None,
@@ -29,7 +33,12 @@ fn remember_input(summary: &str, typ: MemoryType, sub: MemorySubtype) -> remembe
         tags: None,
         updates_id: None,
         source_agent: None,
+        is_static: None,
     }
+}
+
+fn tasks() -> Arc<TaskRegistry> {
+    Arc::new(TaskRegistry::new())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -43,6 +52,8 @@ async fn remember_basic_stores_memory() {
     let out = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Decided to use SurrealDB", MemoryType::Semantic, MemorySubtype::Decision),
     )
     .await
@@ -55,6 +66,7 @@ async fn remember_basic_stores_memory() {
     let results = recall::execute(
         &db,
         None,
+        None,
         recall::RecallInput {
             query: "SurrealDB".to_string(),
             memory_type: None,
@@ -64,7 +76,14 @@ async fn remember_basic_stores_memory() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -81,7 +100,8 @@ async fn remember_with_full_fields() {
         summary: "Completed sprint planning".to_string(),
         memory_type: MemoryType::Episodic,
         subtype: MemorySubtype::Meeting,
-        source: Source::Meeting,
+        channel: Some(Channel::Cli),
+        modality: Some(Modality::Text),
         content: Some("Full transcript here".to_string()),
         project: Some("atlas".to_string()),
         domain: Some(vec!["startup".to_string()]),
@@ -91,16 +111,17 @@ async fn remember_with_full_fields() {
         event_at: None,
         tags: Some(vec!["sprint".to_string(), "planning".to_string()]),
         updates_id: None,
-        source_agent: Some("atlas-agent".to_string()),
+        source_agent: None,
+        is_static: None,
     };
 
-    let out = remember::execute(&db, None, input).await.expect("remember failed");
+    let out = remember::execute(&db, None, None, tasks(), input).await.expect("remember failed");
     assert!(!out.id.is_empty());
 
     // Drill to verify content was stored
     let drilled = drill::execute(
         &db,
-        drill::DrillInput { id: out.id.clone() },
+        drill::DrillInput { id: out.id.clone(), project: None },
     )
     .await
     .expect("drill failed");
@@ -118,7 +139,7 @@ async fn remember_invalid_importance_returns_error() {
     let mut input = remember_input("test", MemoryType::Semantic, MemorySubtype::Fact);
     input.importance = Some(6); // out of range 1-5
 
-    let result = remember::execute(&db, None, input).await;
+    let result = remember::execute(&db, None, None, tasks(), input).await;
     assert!(result.is_err(), "expected error for importance=6");
 }
 
@@ -128,7 +149,7 @@ async fn remember_invalid_subtype_returns_error() {
 
     // meeting subtype is only valid for Episodic, not Semantic
     let input = remember_input("test", MemoryType::Semantic, MemorySubtype::Meeting);
-    let result = remember::execute(&db, None, input).await;
+    let result = remember::execute(&db, None, None, tasks(), input).await;
     assert!(result.is_err(), "Semantic/Meeting should be invalid");
 }
 
@@ -143,7 +164,7 @@ async fn remember_with_people_creates_entity_links() {
     );
     input.people = Some(vec!["Jane Park".to_string()]);
 
-    remember::execute(&db, None, input).await.expect("remember failed");
+    remember::execute(&db, None, None, tasks(), input).await.expect("remember failed");
 
     // Entity should exist and have memory_count >= 1
     let found = entity::execute_find(
@@ -170,6 +191,8 @@ async fn remember_supersession_archives_old_memory() {
     let original = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("We will use Postgres", MemoryType::Semantic, MemorySubtype::Decision),
     )
     .await
@@ -182,11 +205,12 @@ async fn remember_supersession_archives_old_memory() {
         MemorySubtype::Decision,
     );
     new_input.updates_id = Some(original.id.clone());
-    remember::execute(&db, None, new_input).await.expect("new failed");
+    remember::execute(&db, None, None, tasks(), new_input).await.expect("new failed");
 
     // Original should no longer appear in recall
     let results = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: "Postgres".to_string(),
@@ -197,7 +221,14 @@ async fn remember_supersession_archives_old_memory() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -220,6 +251,8 @@ async fn recall_empty_returns_all() {
         remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input(summary, MemoryType::Semantic, MemorySubtype::Decision),
         )
         .await
@@ -228,6 +261,7 @@ async fn recall_empty_returns_all() {
 
     let out = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: String::new(),
@@ -238,7 +272,14 @@ async fn recall_empty_returns_all() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -254,11 +295,12 @@ async fn recall_filters_by_project() {
     a.project = Some("atlas".to_string());
     let mut b = remember_input("Beacon memory", MemoryType::Semantic, MemorySubtype::Fact);
     b.project = Some("beacon".to_string());
-    remember::execute(&db, None, a).await.unwrap();
-    remember::execute(&db, None, b).await.unwrap();
+    remember::execute(&db, None, None, tasks(), a).await.unwrap();
+    remember::execute(&db, None, None, tasks(), b).await.unwrap();
 
     let out = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: String::new(),
@@ -269,7 +311,14 @@ async fn recall_filters_by_project() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -286,11 +335,12 @@ async fn recall_filters_by_domain() {
     health.domain = Some(vec!["health".to_string()]);
     let mut work = remember_input("Closed Series A", MemoryType::Semantic, MemorySubtype::Decision);
     work.domain = Some(vec!["startup".to_string()]);
-    remember::execute(&db, None, health).await.unwrap();
-    remember::execute(&db, None, work).await.unwrap();
+    remember::execute(&db, None, None, tasks(), health).await.unwrap();
+    remember::execute(&db, None, None, tasks(), work).await.unwrap();
 
     let out = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: String::new(),
@@ -301,7 +351,14 @@ async fn recall_filters_by_domain() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -318,6 +375,8 @@ async fn recall_limit_respected() {
         remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input(
                 &format!("Memory {i}"),
                 MemoryType::Semantic,
@@ -331,6 +390,7 @@ async fn recall_limit_respected() {
     let out = recall::execute(
         &db,
         None,
+        None,
         recall::RecallInput {
             query: String::new(),
             memory_type: None,
@@ -340,7 +400,14 @@ async fn recall_limit_respected() {
             since: None,
             until: None,
             limit: Some(3),
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -356,6 +423,8 @@ async fn recall_limit_capped_at_25() {
         remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input(
                 &format!("Memory {i}"),
                 MemoryType::Semantic,
@@ -369,6 +438,7 @@ async fn recall_limit_capped_at_25() {
     let out = recall::execute(
         &db,
         None,
+        None,
         recall::RecallInput {
             query: String::new(),
             memory_type: None,
@@ -378,7 +448,14 @@ async fn recall_limit_capped_at_25() {
             since: None,
             until: None,
             limit: Some(100), // exceeds cap
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -397,11 +474,12 @@ async fn recall_time_range_filter() {
     old.event_at = Some(past);
     let mut new = remember_input("Recent memory", MemoryType::Semantic, MemorySubtype::Fact);
     new.event_at = Some(recent);
-    remember::execute(&db, None, old).await.unwrap();
-    remember::execute(&db, None, new).await.unwrap();
+    remember::execute(&db, None, None, tasks(), old).await.unwrap();
+    remember::execute(&db, None, None, tasks(), new).await.unwrap();
 
     let out = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: String::new(),
@@ -412,7 +490,14 @@ async fn recall_time_range_filter() {
             since: Some(Utc::now() - Duration::days(7)),
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -434,6 +519,8 @@ async fn recall_at_filters_by_created_at() {
     remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Some fact", MemoryType::Semantic, MemorySubtype::Fact),
     )
     .await
@@ -442,13 +529,20 @@ async fn recall_at_filters_by_created_at() {
     // as_of = future → both memories are visible
     let future_out = recall_at::execute(
         &db,
+        None,
+        None,
         recall_at::RecallAtInput {
             query: String::new(),
             as_of: Utc::now() + Duration::days(1),
             project: None,
             domain: None,
             limit: None,
+            author_filter: None,
+            channel: None,
+            modality: None,
+            exclude_retracted: None,
         },
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -457,13 +551,20 @@ async fn recall_at_filters_by_created_at() {
     // as_of = past → memory was created after this point → not visible
     let past_out = recall_at::execute(
         &db,
+        None,
+        None,
         recall_at::RecallAtInput {
             query: String::new(),
             as_of: Utc::now() - Duration::days(1),
             project: None,
             domain: None,
             limit: None,
+            author_filter: None,
+            channel: None,
+            modality: None,
+            exclude_retracted: None,
         },
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -481,9 +582,9 @@ async fn drill_returns_full_content() {
     let mut input = remember_input("Standup notes", MemoryType::Episodic, MemorySubtype::DailyLog);
     input.content = Some("Detailed standup content here".to_string());
 
-    let stored = remember::execute(&db, None, input).await.unwrap();
+    let stored = remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
-    let out = drill::execute(&db, drill::DrillInput { id: stored.id }).await.unwrap();
+    let out = drill::execute(&db, drill::DrillInput { id: stored.id, project: None }).await.unwrap();
     assert_eq!(out.memory.content.as_deref(), Some("Detailed standup content here"));
 }
 
@@ -494,14 +595,16 @@ async fn drill_increments_access_count() {
     let stored = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Access-counted memory", MemoryType::Semantic, MemorySubtype::Fact),
     )
     .await
     .unwrap();
 
     // Drill twice
-    drill::execute(&db, drill::DrillInput { id: stored.id.clone() }).await.unwrap();
-    let out = drill::execute(&db, drill::DrillInput { id: stored.id }).await.unwrap();
+    drill::execute(&db, drill::DrillInput { id: stored.id.clone(), project: None }).await.unwrap();
+    let out = drill::execute(&db, drill::DrillInput { id: stored.id, project: None }).await.unwrap();
 
     assert_eq!(out.memory.access_count, 2);
 }
@@ -512,7 +615,7 @@ async fn drill_nonexistent_returns_error() {
 
     let result = drill::execute(
         &db,
-        drill::DrillInput { id: "mem_nonexistent".to_string() },
+        drill::DrillInput { id: "mem_nonexistent".to_string(), project: None },
     )
     .await;
 
@@ -520,7 +623,7 @@ async fn drill_nonexistent_returns_error() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FORGET
+// ARCHIVE (replaces kb_forget + kb_retract)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -530,16 +633,23 @@ async fn forget_archives_memory() {
     let stored = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("To be forgotten", MemoryType::Working, MemorySubtype::Scratch),
     )
     .await
     .unwrap();
 
-    forget::execute(&db, forget::ForgetInput { id: stored.id.clone() }).await.unwrap();
+    archive::execute(&db, archive::ArchiveInput {
+        id: stored.id.clone(),
+        reason: ArchiveReason::Forget,
+        correction_id: None,
+    }).await.unwrap();
 
     // Memory should not appear in recall
     let results = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: "forgotten".to_string(),
@@ -550,7 +660,14 @@ async fn forget_archives_memory() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -565,9 +682,9 @@ async fn forget_archives_memory() {
 async fn forget_nonexistent_returns_error() {
     let (db, _dir) = test_db().await;
 
-    let result = forget::execute(
+    let result = archive::execute(
         &db,
-        forget::ForgetInput { id: "mem_ghost".to_string() },
+        archive::ArchiveInput { id: "mem_ghost".to_string(), reason: ArchiveReason::Forget, correction_id: None },
     )
     .await;
 
@@ -586,6 +703,8 @@ async fn promote_clears_ttl_and_bumps_importance() {
     let stored = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Quick scratch note", MemoryType::Working, MemorySubtype::Scratch),
     )
     .await
@@ -593,7 +712,7 @@ async fn promote_clears_ttl_and_bumps_importance() {
 
     promote::execute(&db, promote::PromoteInput { id: stored.id.clone() }).await.unwrap();
 
-    let drilled = drill::execute(&db, drill::DrillInput { id: stored.id }).await.unwrap();
+    let drilled = drill::execute(&db, drill::DrillInput { id: stored.id, project: None }).await.unwrap();
 
     // TTL should be cleared
     assert!(drilled.memory.expires_at.is_none(), "expires_at should be None after promote");
@@ -612,6 +731,8 @@ async fn link_creates_relation_between_memories() {
     let a = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Base insight", MemoryType::Semantic, MemorySubtype::Pattern),
     )
     .await
@@ -620,6 +741,8 @@ async fn link_creates_relation_between_memories() {
     let b = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Extended insight", MemoryType::Semantic, MemorySubtype::Pattern),
     )
     .await
@@ -652,6 +775,8 @@ async fn link_all_relation_types() {
         let a = remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input("A", MemoryType::Semantic, MemorySubtype::Fact),
         )
         .await
@@ -659,6 +784,8 @@ async fn link_all_relation_types() {
         let b = remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input("B", MemoryType::Semantic, MemorySubtype::Fact),
         )
         .await
@@ -688,6 +815,8 @@ async fn consolidate_merges_and_archives_originals() {
     let a = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Sprint log day 1", MemoryType::Episodic, MemorySubtype::DailyLog),
     )
     .await
@@ -695,6 +824,8 @@ async fn consolidate_merges_and_archives_originals() {
     let b = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Sprint log day 2", MemoryType::Episodic, MemorySubtype::DailyLog),
     )
     .await
@@ -702,6 +833,8 @@ async fn consolidate_merges_and_archives_originals() {
     let c = remember::execute(
         &db,
         None,
+        None,
+        tasks(),
         remember_input("Sprint log day 3", MemoryType::Episodic, MemorySubtype::DailyLog),
     )
     .await
@@ -709,6 +842,7 @@ async fn consolidate_merges_and_archives_originals() {
 
     let out = consolidate::execute(
         &db,
+        None,
         consolidate::ConsolidateInput {
             ids: vec![a.id.clone(), b.id.clone(), c.id.clone()],
             result_summary: "Sprint week summary: shipped auth flow".to_string(),
@@ -721,12 +855,13 @@ async fn consolidate_merges_and_archives_originals() {
     assert_eq!(out.message, "Consolidated 3 memories");
 
     // Consolidated memory should be retrievable
-    let drilled = drill::execute(&db, drill::DrillInput { id: out.id }).await.unwrap();
+    let drilled = drill::execute(&db, drill::DrillInput { id: out.id, project: None }).await.unwrap();
     assert_eq!(drilled.memory.summary, "Sprint week summary: shipped auth flow");
 
     // Originals should be archived (not in recall)
     let results = recall::execute(
         &db,
+        None,
         None,
         recall::RecallInput {
             query: "Sprint log".to_string(),
@@ -737,7 +872,14 @@ async fn consolidate_merges_and_archives_originals() {
             since: None,
             until: None,
             limit: None,
+            author_filter: None,
+            min_score: None,
+            channel: None,
+            modality: None,
+            rerank: None,
         },
+        &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -754,6 +896,7 @@ async fn consolidate_empty_ids_returns_error() {
 
     let result = consolidate::execute(
         &db,
+        None,
         consolidate::ConsolidateInput {
             ids: vec![],
             result_summary: "nothing".to_string(),
@@ -795,7 +938,7 @@ async fn entity_upsert_creates_and_retrieves() {
     .expect("get failed");
 
     assert_eq!(got.entity.name, "Jane Park");
-    assert_eq!(got.entity.kind, "person");
+    assert_eq!(got.entity.kind, EntityKind::Person);
     assert_eq!(got.entity.roles, vec!["investor"]);
     assert_eq!(got.entity.context.as_deref(), Some("Met at demo day"));
     assert_eq!(got.entity.attrs["fund"], "Sequoia");
@@ -890,7 +1033,7 @@ async fn entity_get_includes_memory_count() {
     // Create an entity via remember (person linking)
     let mut input = remember_input("Meeting with Carol", MemoryType::Episodic, MemorySubtype::Meeting);
     input.people = Some(vec!["Carol Chen".to_string()]);
-    remember::execute(&db, None, input).await.unwrap();
+    remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
     let found = entity::execute_find(&db, entity::EntityFindInput {
         query: "Carol".to_string(), kind: None, role: None,
@@ -942,6 +1085,8 @@ async fn status_counts_active_memories() {
         remember::execute(
             &db,
             None,
+            None,
+            tasks(),
             remember_input("Some fact", MemoryType::Semantic, MemorySubtype::Fact),
         )
         .await
@@ -961,7 +1106,7 @@ async fn status_includes_action_items() {
 
     let mut input = remember_input("Follow up with investor", MemoryType::Prospective, MemorySubtype::ActionItem);
     input.project = Some("atlas".to_string());
-    remember::execute(&db, None, input).await.unwrap();
+    remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
     let report = status::execute(&db, status::StatusInput {
         project: Some("atlas".to_string()),
@@ -980,8 +1125,8 @@ async fn status_filters_by_project() {
     atlas.project = Some("atlas".to_string());
     let mut beacon = remember_input("Beacon decision", MemoryType::Semantic, MemorySubtype::Decision);
     beacon.project = Some("beacon".to_string());
-    remember::execute(&db, None, atlas).await.unwrap();
-    remember::execute(&db, None, beacon).await.unwrap();
+    remember::execute(&db, None, None, tasks(), atlas).await.unwrap();
+    remember::execute(&db, None, None, tasks(), beacon).await.unwrap();
 
     let report = status::execute(&db, status::StatusInput {
         project: Some("atlas".to_string()),
@@ -1016,7 +1161,7 @@ async fn alerts_detects_overdue_action_items() {
         MemorySubtype::ActionItem,
     );
     input.event_at = Some(Utc::now() - Duration::days(3));
-    remember::execute(&db, None, input).await.unwrap();
+    remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
     let out = alerts::execute(&db, &AlertConfig::default()).await.unwrap();
 
@@ -1034,7 +1179,7 @@ async fn alerts_ignores_future_action_items() {
         MemorySubtype::ActionItem,
     );
     input.event_at = Some(Utc::now() + Duration::days(7));
-    remember::execute(&db, None, input).await.unwrap();
+    remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
     let out = alerts::execute(&db, &AlertConfig::default()).await.unwrap();
 

@@ -2,6 +2,10 @@
 ///
 /// Not every test binary uses every helper — allow dead code to avoid
 /// per-binary unused warnings (see ADR-007: modular test architecture).
+pub mod mock_embedder;
+#[allow(unused_imports)]
+pub use mock_embedder::{cosine, MockEmbedder};
+
 #[allow(unused_imports)]
 use smriti::db::memory as db_memory;
 #[allow(unused_imports)]
@@ -26,21 +30,13 @@ pub async fn test_db() -> (client::SurrealClient, tempfile::TempDir) {
 pub async fn create_test_memory(db: &client::SurrealClient, summary: &str) -> MemoryId {
     db_memory::create(
         db,
-        summary.to_string(),
-        None,
-        MemoryType::Semantic,
-        MemorySubtype::Fact,
-        Source::Manual,
-        None,
-        vec![],
-        vec![],
-        Importance::default(),
-        Visibility::default(),
-        None,
-        vec![],
-        None,
-        None,
-        None,
+        db_memory::MemoryDraft::new(
+            summary.to_string(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        ),
     )
     .await
     .expect("test memory creation failed")
@@ -63,7 +59,8 @@ pub fn remember_input(
         summary: padded,
         memory_type: typ,
         subtype: sub,
-        source: Source::Manual,
+        channel: Some(Channel::Cli),
+        modality: Some(Modality::Text),
         content: None,
         project: None,
         domain: None,
@@ -74,5 +71,6 @@ pub fn remember_input(
         tags: None,
         updates_id: None,
         source_agent: None,
+        is_static: None,
     }
 }

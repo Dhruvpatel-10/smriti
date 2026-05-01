@@ -65,7 +65,7 @@ async fn entity_upsert_and_get() {
     use smriti::db::entity;
 
     let id = entity::upsert(
-        &db, "Jane Park", "person",
+        &db, "Jane Park", EntityKind::Person,
         vec!["investor".into()],
         serde_json::json!({"fund": "Sequoia", "check_size": "$500k"}),
         Some("Met at demo day".into()),
@@ -73,7 +73,7 @@ async fn entity_upsert_and_get() {
 
     let ent = entity::get(&db, &id).await.expect("get failed");
     assert_eq!(ent.name, "Jane Park");
-    assert_eq!(ent.kind, "person");
+    assert_eq!(ent.kind, EntityKind::Person);
     assert_eq!(ent.roles, vec!["investor"]);
     assert!(ent.context.as_deref() == Some("Met at demo day"));
 }
@@ -83,8 +83,8 @@ async fn entity_upsert_is_idempotent() {
     let (db, _dir) = test_db().await;
     use smriti::db::entity;
 
-    let id1 = entity::upsert(&db, "Alice", "person", vec![], serde_json::json!({}), None).await.unwrap();
-    let id2 = entity::upsert(&db, "Alice", "person", vec!["engineer".into()], serde_json::json!({"team": "backend"}), Some("Updated context".into())).await.unwrap();
+    let id1 = entity::upsert(&db, "Alice", EntityKind::Person, vec![], serde_json::json!({}), None).await.unwrap();
+    let id2 = entity::upsert(&db, "Alice", EntityKind::Person, vec!["engineer".into()], serde_json::json!({"team": "backend"}), Some("Updated context".into())).await.unwrap();
 
     // Should be the same entity (name is unique key)
     assert_eq!(id1, id2);
@@ -99,15 +99,15 @@ async fn entity_find_by_name() {
     let (db, _dir) = test_db().await;
     use smriti::db::entity;
 
-    entity::upsert(&db, "Alice Johnson", "person", vec!["engineer".into()], serde_json::json!({}), None).await.unwrap();
-    entity::upsert(&db, "Bob Smith", "person", vec!["designer".into()], serde_json::json!({}), None).await.unwrap();
-    entity::upsert(&db, "Acme Corp", "company", vec!["customer".into()], serde_json::json!({}), None).await.unwrap();
+    entity::upsert(&db, "Alice Johnson", EntityKind::Person, vec!["engineer".into()], serde_json::json!({}), None).await.unwrap();
+    entity::upsert(&db, "Bob Smith", EntityKind::Person, vec!["designer".into()], serde_json::json!({}), None).await.unwrap();
+    entity::upsert(&db, "Acme Corp", EntityKind::Company, vec!["customer".into()], serde_json::json!({}), None).await.unwrap();
 
     let results = entity::find(&db, "alice", None, None).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice Johnson");
 
-    let results = entity::find(&db, "alice", Some("company"), None).await.unwrap();
+    let results = entity::find(&db, "alice", Some(EntityKind::Company), None).await.unwrap();
     assert!(results.is_empty(), "Alice is a person, not a company");
 }
 
@@ -154,12 +154,8 @@ async fn duplicate_relate_edges_are_prevented() {
 async fn duplicate_entity_link_is_idempotent() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db, "Met with Alice".into(), None,
-        MemoryType::Episodic, MemorySubtype::Meeting, Source::Manual,
-        None, vec![], vec![], Importance::default(),
-        Visibility::default(), None, vec![], None, None, None,
-    ).await.unwrap();
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("Met with Alice".into(), MemoryType::Episodic, MemorySubtype::Meeting, Some(Channel::Cli), Some(Modality::Text))).await.unwrap();
 
     // Link same entity twice
     graph::link_entity(&db, &id, "Alice").await.unwrap();

@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use smriti::db::{client, memory};
+use smriti::db::{client, embeddings::store_vector_pub, memory};
 use smriti::types::*;
 
 mod common;
@@ -13,24 +13,13 @@ use common::{test_db, create_test_memory};
 async fn create_and_get_memory() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "Decided to use SurrealDB for embedded storage".into(),
-        Some("Full reasoning: graph relations, no daemon, SurrealKV engine".into()),
-        MemoryType::Semantic,
-        MemorySubtype::Decision,
-        Source::Manual,
-        Some("knowledge-base".into()),
-        vec![],                    // domain
-        vec!["alice".into()],
-        Importance::new(5).unwrap(),
-        Visibility::default(),     // visibility
-        None,
-        vec!["architecture".into(), "database".into()],
-        None,
-        None,                      // source_agent
-        None,                      // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("Decided to use SurrealDB for embedded storage".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))
+            .content("Full reasoning: graph relations, no daemon, SurrealKV engine".into())
+            .project("knowledge-base".into())
+            .people(vec!["alice".into()])
+            .importance(Importance::new(5).unwrap())
+            .tags(vec!["architecture".into(), "database".into()]))
     .await
     .expect("create failed");
 
@@ -41,7 +30,8 @@ async fn create_and_get_memory() {
     assert_eq!(mem.content.as_deref(), Some("Full reasoning: graph relations, no daemon, SurrealKV engine"));
     assert_eq!(mem.memory_type, MemoryType::Semantic);
     assert_eq!(mem.subtype, MemorySubtype::Decision);
-    assert_eq!(mem.source, Source::Manual);
+    assert_eq!(mem.channel, Some(Channel::Cli));
+    assert_eq!(mem.modality, Some(Modality::Text));
     assert_eq!(mem.project.as_deref(), Some("knowledge-base"));
     assert_eq!(mem.people, vec!["alice"]);
     assert_eq!(mem.importance.value(), 5);
@@ -55,24 +45,8 @@ async fn create_and_get_memory() {
 async fn create_rejects_invalid_type_subtype_pairing() {
     let (db, _dir) = test_db().await;
 
-    let result = memory::create(
-        &db,
-        "bad pairing".into(),
-        None,
-        MemoryType::Episodic,
-        MemorySubtype::Decision,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let result = memory::create(&db,
+        memory::MemoryDraft::new("bad pairing".into(), MemoryType::Episodic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text)))
     .await;
 
     assert!(result.is_err());
@@ -112,7 +86,7 @@ async fn archive_memory() {
     let (db, _dir) = test_db().await;
 
     let id = create_test_memory(&db, "to be archived").await;
-    memory::archive(&db, &id).await.expect("archive failed");
+    memory::archive(&db, &id, InvalidationReason::Forgotten).await.expect("archive failed");
 
     let mem = memory::get(&db, &id).await.unwrap();
     assert_eq!(mem.status, MemoryStatus::Archived);
@@ -122,7 +96,7 @@ async fn archive_memory() {
 async fn archive_nonexistent_returns_error() {
     let (db, _dir) = test_db().await;
 
-    let result = memory::archive(&db, &MemoryId::from("fake_id".to_string())).await;
+    let result = memory::archive(&db, &MemoryId::from("fake_id".to_string()), InvalidationReason::Forgotten).await;
     assert!(result.is_err());
 }
 
@@ -131,34 +105,21 @@ async fn supersede_memory() {
     let (db, _dir) = test_db().await;
 
     let id = create_test_memory(&db, "old decision").await;
-    memory::supersede(&db, &id).await.expect("supersede failed");
+    memory::supersede(&db, &id, Utc::now()).await.expect("supersede failed");
 
     let mem = memory::get(&db, &id).await.unwrap();
-    assert_eq!(mem.status, MemoryStatus::Superseded);
+    // supersede now writes status='archived'; invalidation_reason is the source of truth
+    assert_eq!(mem.status, MemoryStatus::Archived);
+    assert_eq!(mem.invalidation_reason, Some(InvalidationReason::Superseded));
 }
 
 #[tokio::test]
 async fn promote_clears_expiry_and_bumps_importance() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "scratch note".into(),
-        None,
-        MemoryType::Working,
-        MemorySubtype::Scratch,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::new(1).unwrap(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("scratch note".into(), MemoryType::Working, MemorySubtype::Scratch, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(1).unwrap()))
     .await
     .unwrap();
 
@@ -177,24 +138,9 @@ async fn promote_clears_expiry_and_bumps_importance() {
 async fn promote_preserves_high_importance() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "important scratch".into(),
-        None,
-        MemoryType::Working,
-        MemorySubtype::Priority,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::new(5).unwrap(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("important scratch".into(), MemoryType::Working, MemorySubtype::Priority, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(5).unwrap()))
     .await
     .unwrap();
 
@@ -208,24 +154,8 @@ async fn promote_preserves_high_importance() {
 async fn working_scratch_gets_48h_ttl() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "scratch".into(),
-        None,
-        MemoryType::Working,
-        MemorySubtype::Scratch,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("scratch".into(), MemoryType::Working, MemorySubtype::Scratch, Some(Channel::Cli), Some(Modality::Text)))
     .await
     .unwrap();
 
@@ -242,24 +172,8 @@ async fn working_scratch_gets_48h_ttl() {
 async fn working_priority_gets_7d_ttl() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "priority".into(),
-        None,
-        MemoryType::Working,
-        MemorySubtype::Priority,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("priority".into(), MemoryType::Working, MemorySubtype::Priority, Some(Channel::Cli), Some(Modality::Text)))
     .await
     .unwrap();
 
@@ -276,24 +190,8 @@ async fn working_priority_gets_7d_ttl() {
 async fn working_open_question_gets_30d_ttl() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "open question".into(),
-        None,
-        MemoryType::Working,
-        MemorySubtype::OpenQuestion,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("open question".into(), MemoryType::Working, MemorySubtype::OpenQuestion, Some(Channel::Cli), Some(Modality::Text)))
     .await
     .unwrap();
 
@@ -310,24 +208,8 @@ async fn working_open_question_gets_30d_ttl() {
 async fn semantic_decision_has_no_ttl() {
     let (db, _dir) = test_db().await;
 
-    let id = memory::create(
-        &db,
-        "permanent decision".into(),
-        None,
-        MemoryType::Semantic,
-        MemorySubtype::Decision,
-        Source::Manual,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        None,
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("permanent decision".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text)))
     .await
     .unwrap();
 
@@ -368,24 +250,9 @@ async fn explicit_event_at_is_preserved() {
     let (db, _dir) = test_db().await;
     let past = Utc::now() - Duration::days(30);
 
-    let id = memory::create(
-        &db,
-        "past event".into(),
-        None,
-        MemoryType::Episodic,
-        MemorySubtype::Meeting,
-        Source::Meeting,
-        None,
-        vec![],                // domain
-        vec![],
-        Importance::default(),
-        Visibility::default(), // visibility
-        Some(past),
-        vec![],
-        None,
-        None,                  // source_agent
-        None,                  // session_id
-    )
+    let id = memory::create(&db,
+        memory::MemoryDraft::new("past event".into(), MemoryType::Episodic, MemorySubtype::Meeting, None, Some(Modality::Transcript))
+            .event_at(past))
     .await
     .unwrap();
 
@@ -414,4 +281,67 @@ async fn connect_twice_same_path_is_idempotent() {
     let db2 = client::connect(dir.path()).await.expect("second connect");
     let count = memory::count(&db2, None).await.unwrap();
     assert_eq!(count, 1, "data should persist across reconnects");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOCTOU / ATOMIC DEDUP
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Verify that two sequential `create_with_dedup_atomic` calls with an identical
+/// embedding vector result in exactly one accepted write and one duplicate rejection.
+///
+/// This tests the atomic transaction guarantee: the second call sees the first
+/// record in its dedup scan (both vector storage and record creation are atomic
+/// within the same transaction) and fires THROW.
+///
+/// Note: SurrealKV is single-writer, so we can't truly have two concurrent
+/// transactions. Sequential calls with vector pre-seeded test the same property:
+/// the dedup scan inside the transaction sees already-committed records.
+#[tokio::test]
+async fn dedup_atomic_second_identical_call_rejected() {
+    let (db, _dir) = test_db().await;
+
+    // A unit vector shared by both writers — cosine similarity = 1.0 > REJECT_THRESHOLD.
+    let shared_vector: Vec<f32> = {
+        let mut v = vec![0.0_f32; 256];
+        v[0] = 1.0;
+        v
+    };
+
+    // First writer creates a record and immediately stores its vector
+    // (simulating what execute_inner does post-create).
+    let draft1 = memory::MemoryDraft::new(
+        "First writer — dedup atomicity test memory".to_string(),
+        MemoryType::Semantic,
+        MemorySubtype::Fact,
+        Some(Channel::Cli),
+        Some(Modality::Text),
+    );
+    let (first_id, _warn) = memory::create_with_dedup_atomic(&db, draft1, shared_vector.clone(), None)
+        .await
+        .expect("first create should succeed");
+
+    // Store the vector so it is visible to the next call's dedup scan.
+    store_vector_pub(&db, first_id.as_str(), shared_vector.clone())
+        .await
+        .expect("vector store for first record failed");
+
+    // Second writer tries with the same vector — should be rejected as duplicate.
+    let draft2 = memory::MemoryDraft::new(
+        "Second writer — dedup atomicity test memory".to_string(),
+        MemoryType::Semantic,
+        MemorySubtype::Fact,
+        Some(Channel::Cli),
+        Some(Modality::Text),
+    );
+    let r2 = memory::create_with_dedup_atomic(&db, draft2, shared_vector.clone(), None).await;
+
+    assert!(
+        matches!(&r2, Err(smriti::error::KbError::InvalidInput(msg)) if msg.contains("duplicate")),
+        "second create with identical vector should be rejected as duplicate; got: {r2:?}"
+    );
+
+    // Only one memory record should exist (the first one, not the rejected second).
+    let total = memory::count(&db, None).await.unwrap();
+    assert_eq!(total, 1, "only one memory should exist after dedup rejection");
 }
