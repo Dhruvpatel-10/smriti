@@ -6,3 +6,16 @@
 .claude/
 .agents/
 skills-lock.json
+
+# Build artifacts
+*.rlib
+
+# Local model cache (fastembed/HuggingFace)
+.fastembed_cache/
+
+# Bench harness — tracked as a separate subproject
+/bench/
+
+# Sidecar build outputs
+/sidecar/dist/
+/sidecar/node_modules/
