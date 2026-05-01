@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::enums::EntityKind;
 use super::ids::EntityId;
 use super::memory::MemorySummary;
 
@@ -10,7 +11,7 @@ use super::memory::MemorySummary;
 pub struct Entity {
     pub id: EntityId,
     pub name: String,
-    pub kind: String,
+    pub kind: EntityKind,
     pub roles: Vec<String>,
     pub attrs: serde_json::Value,
     pub context: Option<String>,
@@ -23,7 +24,7 @@ pub struct Entity {
 pub struct EntitySummary {
     pub id: EntityId,
     pub name: String,
-    pub kind: String,
+    pub kind: EntityKind,
     pub roles: Vec<String>,
     pub context: Option<String>,
     pub memory_count: u64,
@@ -34,7 +35,7 @@ pub struct EntitySummary {
 pub struct EntityFull {
     pub id: EntityId,
     pub name: String,
-    pub kind: String,
+    pub kind: EntityKind,
     pub roles: Vec<String>,
     pub attrs: serde_json::Value,
     pub context: Option<String>,

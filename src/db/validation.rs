@@ -1,7 +1,7 @@
 use chrono::Duration;
 
 use crate::error::{KbError, Result};
-use crate::types::{Importance, MemorySubtype, MemoryType};
+use crate::types::{Channel, Importance, MemorySubtype, MemoryType, Modality};
 
 // ── Summary quality gate ───────────────────────────────────────────────────
 
@@ -86,24 +86,61 @@ pub fn ttl_duration(
     }
 }
 
+// ── Static-memory classifier ───────────────────────────────────────────────
+
+/// Decide whether a memory should be flagged `is_static` based on subtype +
+/// importance. Static memories are permanent facts about the user (preferences,
+/// values, life goals, high-importance facts) — surfaced first by `kb_profile`,
+/// excluded from importance-decay pruning, and never gain a TTL.
+///
+/// This is a default — callers may override via the explicit `is_static` field
+/// on `kb_remember`. Mirrors the migration_010 backfill rule.
+pub fn classify_static(subtype: MemorySubtype, importance: Importance) -> bool {
+    match subtype {
+        MemorySubtype::Value | MemorySubtype::LifeGoal | MemorySubtype::Preference => true,
+        MemorySubtype::Fact => importance.value() >= 4,
+        _ => false,
+    }
+}
+
 // ── Contextual embedding prepend ───────────────────────────────────────────
 
-/// Build contextual text for embedding by prepending type/project/domain metadata.
-/// This improves embedding quality by giving the model context about the memory's role.
+/// Build contextual text for embedding by prepending channel/modality/type/project/domain/people
+/// metadata. Including `people` raises recall on entity-anchored queries — the
+/// dense embedder and the BM25 index both index this string, so a question
+/// like "what does Arjun think about X" can match memories whose summary does
+/// not contain "Arjun" but whose `people` field does.
+///
+/// Format: `[channel/modality] [type/subtype] [project] [domains] [people: ...] summary`
+/// The `[channel/modality]` prefix is omitted when both are `None`. When only one is
+/// present, `-` is used as a placeholder so the embedder sees a stable token shape.
+#[allow(clippy::too_many_arguments)]
 pub fn contextual_text(
     summary: &str,
     memory_type: MemoryType,
     subtype: MemorySubtype,
     project: Option<&str>,
     domains: &[String],
+    people: &[String],
+    channel: Option<Channel>,
+    modality: Option<Modality>,
 ) -> String {
-    let mut parts = Vec::with_capacity(4);
+    let mut parts = Vec::with_capacity(6);
+    match (channel, modality) {
+        (None, None) => {}
+        (Some(c), Some(m)) => parts.push(format!("[{}/{}]", c.as_str(), m.as_str())),
+        (Some(c), None) => parts.push(format!("[{}/{}]", c.as_str(), "-")),
+        (None, Some(m)) => parts.push(format!("[{}/{}]", "-", m.as_str())),
+    }
     parts.push(format!("[{}/{}]", memory_type, subtype));
     if let Some(p) = project {
         parts.push(format!("[{}]", p));
     }
     if !domains.is_empty() {
         parts.push(format!("[{}]", domains.join(",")));
+    }
+    if !people.is_empty() {
+        parts.push(format!("[people: {}]", people.join(",")));
     }
     parts.push(summary.to_string());
     parts.join(" ")
@@ -114,6 +151,28 @@ pub fn contextual_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Content validation --
+
+    #[test]
+    fn content_over_limit_rejected() {
+        let big = "x".repeat(MAX_CONTENT_BYTES + 1);
+        let result = validate_content(Some(&big));
+        assert!(result.is_err(), "content above limit must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("content exceeds"), "error message should mention content exceeds: {msg}");
+    }
+
+    #[test]
+    fn content_at_limit_accepted() {
+        let exactly = "x".repeat(MAX_CONTENT_BYTES);
+        assert!(validate_content(Some(&exactly)).is_ok());
+    }
+
+    #[test]
+    fn content_none_accepted() {
+        assert!(validate_content(None).is_ok());
+    }
 
     // -- Summary validation --
 
@@ -200,11 +259,40 @@ mod tests {
 
     // -- Contextual embedding --
 
+    // -- Unicode summary boundary tests --
+    //
+    // `validate_summary` uses byte length (trimmed.len()), not char count.
+    // These tests document the current byte-length semantics.
+    // "あいうえお" = 5 chars × 3 bytes = 15 bytes → passes the ≥10 byte gate.
+    // "あい"       = 2 chars × 3 bytes = 6 bytes  → fails (< 10 bytes).
+
+    #[test]
+    fn validate_summary_accepts_15_byte_unicode() {
+        // 5 hiragana chars × 3 bytes each = 15 bytes — should pass
+        let s = "あいうえお";
+        assert_eq!(s.len(), 15, "precondition: 15 bytes");
+        assert!(
+            validate_summary(s).is_ok(),
+            "15-byte unicode summary should pass the ≥10 byte gate"
+        );
+    }
+
+    #[test]
+    fn validate_summary_rejects_6_byte_unicode() {
+        // 2 hiragana chars × 3 bytes each = 6 bytes — should fail
+        let s = "あい";
+        assert_eq!(s.len(), 6, "precondition: 6 bytes");
+        assert!(
+            validate_summary(s).is_err(),
+            "6-byte unicode summary should fail the ≥10 byte gate (byte-length semantics)"
+        );
+    }
+
     #[test]
     fn contextual_text_with_project_and_domain() {
         let text = contextual_text(
             "Decided to use Stripe", MemoryType::Semantic, MemorySubtype::Decision,
-            Some("atlas"), &["startup".to_string()],
+            Some("atlas"), &["startup".to_string()], &[], None, None,
         );
         assert_eq!(text, "[semantic/decision] [atlas] [startup] Decided to use Stripe");
     }
@@ -213,8 +301,65 @@ mod tests {
     fn contextual_text_minimal() {
         let text = contextual_text(
             "A simple fact", MemoryType::Semantic, MemorySubtype::Fact,
-            None, &[],
+            None, &[], &[], None, None,
         );
         assert_eq!(text, "[semantic/fact] A simple fact");
+    }
+
+    #[test]
+    fn contextual_text_includes_people() {
+        let text = contextual_text(
+            "Played chess; rating rose to 1485",
+            MemoryType::Episodic, MemorySubtype::DailyLog,
+            None, &[], &["Arjun".to_string(), "Priya".to_string()], None, None,
+        );
+        assert_eq!(
+            text,
+            "[episodic/daily_log] [people: Arjun,Priya] Played chess; rating rose to 1485"
+        );
+    }
+
+    #[test]
+    fn contextual_text_full_with_people() {
+        let text = contextual_text(
+            "Decided to use Stripe",
+            MemoryType::Semantic, MemorySubtype::Decision,
+            Some("atlas"), &["startup".to_string()], &["Bob".to_string()], None, None,
+        );
+        assert_eq!(
+            text,
+            "[semantic/decision] [atlas] [startup] [people: Bob] Decided to use Stripe"
+        );
+    }
+
+    #[test]
+    fn contextual_text_with_channel_and_modality() {
+        use crate::types::{Channel, Modality};
+        let text = contextual_text(
+            "Meeting notes summary",
+            MemoryType::Episodic, MemorySubtype::Meeting,
+            None, &[], &[], Some(Channel::Slack), Some(Modality::Transcript),
+        );
+        assert_eq!(text, "[slack/transcript] [episodic/meeting] Meeting notes summary");
+    }
+
+    #[test]
+    fn contextual_text_channel_only() {
+        use crate::types::Channel;
+        let text = contextual_text(
+            "Quick note", MemoryType::Semantic, MemorySubtype::Fact,
+            None, &[], &[], Some(Channel::Cli), None,
+        );
+        assert_eq!(text, "[cli/-] [semantic/fact] Quick note");
+    }
+
+    #[test]
+    fn contextual_text_modality_only() {
+        use crate::types::Modality;
+        let text = contextual_text(
+            "Code review findings", MemoryType::Semantic, MemorySubtype::Fact,
+            None, &[], &[], None, Some(Modality::Code),
+        );
+        assert_eq!(text, "[-/code] [semantic/fact] Code review findings");
     }
 }

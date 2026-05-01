@@ -3,27 +3,14 @@ use tracing::{info, instrument};
 
 use crate::config::PruningConfig;
 use crate::db::client::SurrealClient;
+use crate::db::{BITEMPORAL_ACTIVE, BITEMPORAL_ACTIVE_NO_TTL};
 use crate::error::{KbError, Result};
+use crate::types::MemorySubtype;
 
 // ── Importance Immunity ────────────────────────────────────────────────────
 
-/// Subtypes that are immune to SM-2 decay regardless of importance.
-const IMMUNE_SUBTYPES: &[&str] = &["decision", "value", "life_goal"];
-
 /// Importance threshold for immunity — memories at or above this never decay.
 const IMPORTANCE_IMMUNE_THRESHOLD: u8 = 5;
-
-/// Build the SurrealQL condition that excludes immune memories from decay.
-fn immunity_condition() -> String {
-    let subtypes = IMMUNE_SUBTYPES
-        .iter()
-        .map(|s| format!("'{s}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "AND importance < {IMPORTANCE_IMMUNE_THRESHOLD} AND subtype NOT IN [{subtypes}]"
-    )
-}
 
 // ── Domain-Aware Decay Rates ───────────────────────────────────────────────
 
@@ -56,15 +43,28 @@ pub async fn run_all(db: &SurrealClient, config: &PruningConfig) -> Result<()> {
 }
 
 /// Archive memories past their `expires_at` (TTL-based expiry).
+///
+/// LOW: `RETURN AFTER` fetches full rows to obtain a count. SurrealDB v3
+/// UPDATE does not expose a `RETURN count` projection, so splitting into a
+/// SELECT count + UPDATE RETURN NONE would require two round-trips. On
+/// SurrealKV (embedded, single-writer) the full-row serialization cost is
+/// acceptable for the small result sets typical of TTL expiry. Revisit if
+/// profiling shows this as a hot path.
 #[instrument(skip(db))]
 pub async fn expire_ttl(db: &SurrealClient) -> Result<u64> {
     let now = Utc::now();
     let mut result = db
-        .query(
-            "UPDATE memory SET status = 'archived', updated_at = time::now()
-             WHERE status = 'active' AND expires_at != NONE AND expires_at < $now
-             RETURN AFTER",
-        )
+        .query(format!(
+            "UPDATE memory
+             SET status = 'archived',
+                 invalidated_at = time::now(),
+                 invalidation_reason = 'expired',
+                 updated_at = time::now()
+             WHERE {BITEMPORAL_ACTIVE_NO_TTL}
+               AND expires_at != NONE
+               AND expires_at < $now
+             RETURN AFTER"
+        ))
         .bind(("now", now))
         .await
         .map_err(|e| KbError::db("TTL expiry", e))?;
@@ -107,34 +107,36 @@ pub async fn expire_ttl(db: &SurrealClient) -> Result<u64> {
 #[instrument(skip_all)]
 pub async fn sm2_decay(db: &SurrealClient, config: &PruningConfig) -> Result<u64> {
     let threshold = config.importance_archive_threshold as i64;
-    let immunity = immunity_condition();
+    let immune_threshold = IMPORTANCE_IMMUNE_THRESHOLD as i64;
+    let immune_subtypes = MemorySubtype::immune_strs();
 
     // SM-2 aware decay: memories past their review date that haven't been accessed.
     // Excludes immune memories (importance >= 5 or protected subtypes).
     // Excludes working/* (TTL handles those).
     // Use time::now() inline rather than binding a Rust DateTime to avoid
     // potential format mismatches in datetime comparison.
-    let sm2_sql = format!(
-        "UPDATE memory SET
-            importance = importance - 1,
-            ease_factor = IF (ease_factor ?? 2.5) - 0.2 > 1.3 {{ (ease_factor ?? 2.5) - 0.2 }} ELSE {{ 1.3 }},
-            review_interval = 1,
-            next_review_at = time::now() + 1d,
-            access_count = 0,
-            updated_at = time::now()
-         WHERE status = 'active'
-           AND next_review_at != NONE
-           AND next_review_at < time::now()
-           AND access_count = 0
-           AND importance > $threshold
-           AND memory_type != 'working'
-           {immunity}
-         RETURN AFTER"
-    );
-
     let mut sm2_result = db
-        .query(&sm2_sql)
+        .query(format!(
+            "UPDATE memory SET
+                importance = importance - 1,
+                ease_factor = IF (ease_factor ?? 2.5) - 0.2 > 1.3 {{ (ease_factor ?? 2.5) - 0.2 }} ELSE {{ 1.3 }},
+                review_interval = 1,
+                next_review_at = time::now() + 1d,
+                access_count = 0,
+                updated_at = time::now()
+             WHERE {BITEMPORAL_ACTIVE}
+               AND next_review_at != NONE
+               AND next_review_at < time::now()
+               AND access_count = 0
+               AND importance > $threshold
+               AND importance < $immune_threshold
+               AND memory_type != 'working'
+               AND subtype NOT IN $immune_subtypes
+             RETURN AFTER"
+        ))
         .bind(("threshold", threshold))
+        .bind(("immune_threshold", immune_threshold))
+        .bind(("immune_subtypes", immune_subtypes.clone()))
         .await
         .map_err(|e| KbError::db("SM-2 decay", e))?;
 
@@ -144,23 +146,24 @@ pub async fn sm2_decay(db: &SurrealClient, config: &PruningConfig) -> Result<u64
 
     // Legacy fallback: memories without SM-2 fields use interval-based decay.
     // Same immunity rules apply.
-    let legacy_sql = format!(
-        "UPDATE memory SET
-            importance = importance - 1,
-            updated_at = time::now()
-         WHERE status = 'active'
-           AND next_review_at = NONE
-           AND access_count = 0
-           AND importance > $threshold
-           AND memory_type != 'working'
-           {immunity}
-           AND updated_at < time::now() - type::duration($interval)
-         RETURN AFTER"
-    );
-
     let mut legacy_result = db
-        .query(&legacy_sql)
+        .query(format!(
+            "UPDATE memory SET
+                importance = importance - 1,
+                updated_at = time::now()
+             WHERE {BITEMPORAL_ACTIVE}
+               AND next_review_at = NONE
+               AND access_count = 0
+               AND importance > $threshold
+               AND importance < $immune_threshold
+               AND memory_type != 'working'
+               AND subtype NOT IN $immune_subtypes
+               AND updated_at < time::now() - type::duration($interval)
+             RETURN AFTER"
+        ))
         .bind(("threshold", threshold))
+        .bind(("immune_threshold", immune_threshold))
+        .bind(("immune_subtypes", immune_subtypes))
         .bind(("interval", format!("{}d", config.access_decay_interval_days)))
         .await
         .map_err(|e| KbError::db("legacy access decay", e))?;
@@ -181,17 +184,25 @@ pub async fn sm2_decay(db: &SurrealClient, config: &PruningConfig) -> Result<u64
 #[instrument(skip_all)]
 async fn archive_below_threshold(db: &SurrealClient, config: &PruningConfig) -> Result<u64> {
     let threshold = config.importance_archive_threshold as i64;
-    let immunity = immunity_condition();
-
-    let sql = format!(
-        "UPDATE memory SET status = 'archived', updated_at = time::now()
-         WHERE status = 'active' AND importance <= $threshold {immunity}
-         RETURN AFTER"
-    );
+    let immune_threshold = IMPORTANCE_IMMUNE_THRESHOLD as i64;
+    let immune_subtypes = MemorySubtype::immune_strs();
 
     let mut result = db
-        .query(&sql)
+        .query(format!(
+            "UPDATE memory
+             SET status = 'archived',
+                 invalidated_at = time::now(),
+                 invalidation_reason = 'expired',
+                 updated_at = time::now()
+             WHERE {BITEMPORAL_ACTIVE}
+               AND importance < $threshold
+               AND importance < $immune_threshold
+               AND subtype NOT IN $immune_subtypes
+             RETURN AFTER"
+        ))
         .bind(("threshold", threshold))
+        .bind(("immune_threshold", immune_threshold))
+        .bind(("immune_subtypes", immune_subtypes))
         .await
         .map_err(|e| KbError::db("archive below threshold", e))?;
 

@@ -3,6 +3,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::ids::{EntityId, MemoryId};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertType {
@@ -10,6 +12,10 @@ pub enum AlertType {
     StaleContact,
     ExpiringMemory,
     Contradiction,
+    /// More than `alerts.extraction_backlog_threshold` memories have a failed
+    /// extraction status (anchor_failed, relation_failed, both_failed, or
+    /// sidecar_unavailable). Run `--retry-failed-extraction` to clear.
+    ExtractionBacklog,
 }
 
 impl fmt::Display for AlertType {
@@ -19,6 +25,37 @@ impl fmt::Display for AlertType {
             Self::StaleContact => write!(f, "stale_contact"),
             Self::ExpiringMemory => write!(f, "expiring_memory"),
             Self::Contradiction => write!(f, "contradiction"),
+            Self::ExtractionBacklog => write!(f, "extraction_backlog"),
+        }
+    }
+}
+
+/// Typed reference carried by an alert. Prevents callers from confusing a
+/// `MemoryId` with an entity name or an `EntityId`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum AlertReference {
+    /// Alert relates to a specific memory record.
+    Memory(MemoryId),
+    /// Alert relates to a specific entity record.
+    Entity(EntityId),
+    /// Alert relates to an entity identified only by name (e.g. stale-contact
+    /// checks, which query entity names but not record IDs).
+    EntityName(String),
+    /// Alert is aggregate (e.g. ExtractionBacklog) with a numeric count rather
+    /// than a specific record reference. Stored as a string for uniformity.
+    Count(String),
+}
+
+impl AlertReference {
+    /// Raw string representation used for equality checks in tests and logging.
+    /// Returns the inner string of whichever variant is active.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Memory(id) => id.as_str(),
+            Self::Entity(id) => id.as_str(),
+            Self::EntityName(name) => name.as_str(),
+            Self::Count(s) => s.as_str(),
         }
     }
 }
@@ -27,8 +64,8 @@ impl fmt::Display for AlertType {
 pub struct Alert {
     pub alert_type: AlertType,
     pub message: String,
-    /// ID of the memory or entity this alert relates to.
-    pub reference_id: String,
+    /// Typed reference to the memory or entity this alert relates to.
+    pub reference: AlertReference,
     pub created_at: DateTime<Utc>,
 }
 
@@ -49,6 +86,7 @@ mod tests {
             AlertType::StaleContact,
             AlertType::ExpiringMemory,
             AlertType::Contradiction,
+            AlertType::ExtractionBacklog,
         ];
         for v in &all {
             let json = serde_json::to_string(v).unwrap();

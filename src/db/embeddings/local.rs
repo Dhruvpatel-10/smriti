@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
+use async_trait::async_trait;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use tracing::{info, instrument, warn};
 
 use crate::config::EmbeddingConfig;
-use crate::db::client::SurrealClient;
+use crate::db::embeddings::fingerprint::EmbedderFingerprint;
+use crate::db::embeddings::traits::Embedder;
 use crate::error::{KbError, Result};
 
 /// In-process embedding service using ONNX Runtime (via fastembed).
@@ -22,7 +24,7 @@ use crate::error::{KbError, Result};
 pub struct LocalEmbedder {
     model: Arc<OnceLock<std::result::Result<Mutex<TextEmbedding>, String>>>,
     model_id: EmbeddingModel,
-    dimensions: usize,
+    pub(crate) dimensions: usize,
 }
 
 impl LocalEmbedder {
@@ -32,6 +34,7 @@ impl LocalEmbedder {
             "nomic-embed-text-v1.5" | "nomic" => EmbeddingModel::NomicEmbedTextV15,
             "bge-small-en-v1.5" | "bge-small" => EmbeddingModel::BGESmallENV15,
             "bge-large-en-v1.5" | "bge-large" => EmbeddingModel::BGELargeENV15,
+            "gte-large-en-v1.5-q" | "gte-q" => EmbeddingModel::GTELargeENV15Q,
             "all-minilm-l6-v2" | "minilm" => EmbeddingModel::AllMiniLML6V2,
             "jina-v2-base-en" | "jina" => EmbeddingModel::JinaEmbeddingsV2BaseEN,
             "gte-large-en-v1.5" | "gte" => EmbeddingModel::GTELargeENV15,
@@ -52,12 +55,26 @@ impl LocalEmbedder {
         }
     }
 
+    pub fn model_name(&self) -> &str {
+        match self.model_id {
+            EmbeddingModel::EmbeddingGemma300M => "embeddinggemma-300m",
+            EmbeddingModel::NomicEmbedTextV15 => "nomic-embed-text-v1.5",
+            EmbeddingModel::BGESmallENV15 => "bge-small-en-v1.5",
+            EmbeddingModel::BGELargeENV15 => "bge-large-en-v1.5",
+            EmbeddingModel::GTELargeENV15Q => "gte-large-en-v1.5-q",
+            EmbeddingModel::AllMiniLML6V2 => "all-minilm-l6-v2",
+            EmbeddingModel::JinaEmbeddingsV2BaseEN => "jina-v2-base-en",
+            EmbeddingModel::GTELargeENV15 => "gte-large-en-v1.5",
+            EmbeddingModel::MxbaiEmbedLargeV1 => "mxbai-embed-large-v1",
+            _ => "unknown",
+        }
+    }
+
     /// Ensure the model is loaded. Called lazily on first embed().
     fn ensure_loaded(&self) -> Result<()> {
         let result = self.model.get_or_init(|| {
             info!("loading embedding model (first use — may download ~200MB)");
-            let opts = InitOptions::new(self.model_id.clone())
-                .with_show_download_progress(true);
+            let opts = InitOptions::new(self.model_id.clone()).with_show_download_progress(true);
             match TextEmbedding::try_new(opts) {
                 Ok(model) => {
                     info!("embedding model loaded");
@@ -65,7 +82,8 @@ impl LocalEmbedder {
                 }
                 Err(e) => {
                     let msg = format!("failed to load embedding model: {e}");
-                    tracing::error!("{msg}");
+                    // WARN not ERROR — server continues without vectors (graceful degrade)
+                    tracing::warn!("{msg}");
                     Err(msg)
                 }
             }
@@ -90,7 +108,9 @@ impl LocalEmbedder {
         let dims = self.dimensions;
 
         tokio::task::spawn_blocking(move || {
-            let loaded = model_arc.get().expect("model should be initialized");
+            let loaded = model_arc
+                .get()
+                .ok_or_else(|| KbError::Embedding("embedding model not initialized".to_string()))?;
             let mutex = loaded
                 .as_ref()
                 .map_err(|msg| KbError::Embedding(msg.clone()))?;
@@ -118,47 +138,29 @@ impl LocalEmbedder {
     }
 }
 
-/// Embed a memory's summary and store the vector. Fire-and-forget safe.
-///
-/// Logs warnings on failure rather than propagating errors, since embedding
-/// is best-effort and must not block the write path.
-pub fn spawn_embed_and_store(
-    embedder: Arc<LocalEmbedder>,
-    db: SurrealClient,
-    memory_id: String,
-    text: String,
-) {
-    tokio::spawn(async move {
-        match embedder.embed(&text).await {
-            Ok(vector) => {
-                if let Err(e) = store_vector(&db, &memory_id, &vector).await {
-                    warn!(memory_id, "failed to store embedding: {e}");
-                }
-            }
-            Err(e) => {
-                warn!(memory_id, "embedding generation failed: {e}");
-            }
+#[async_trait]
+impl Embedder for LocalEmbedder {
+    fn fingerprint(&self) -> EmbedderFingerprint {
+        EmbedderFingerprint {
+            provider: "local".to_string(),
+            model: self.model_name().to_string(),
+            dimensions: self.dimensions,
         }
-    });
-}
+    }
 
-/// Write a vector to an existing memory record.
-/// Public variant for use from remember.rs dedup flow.
-pub async fn store_vector_pub(db: &SurrealClient, memory_id: &str, vector: &[f32]) -> Result<()> {
-    store_vector(db, memory_id, vector).await
-}
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
 
-/// Write a vector to an existing memory record.
-///
-/// Vectors are bound as f32 directly — fastembed produces f32, and JSON numbers
-/// are type-agnostic, so SurrealDB receives identical values without the
-/// allocation overhead of an f64 conversion.
-#[instrument(skip(db, vector))]
-async fn store_vector(db: &SurrealClient, memory_id: &str, vector: &[f32]) -> Result<()> {
-    db.query("UPDATE type::record('memory', $id) SET vector = $vector")
-        .bind(("id", memory_id.to_string()))
-        .bind(("vector", vector.to_vec()))
-        .await
-        .map_err(|e| KbError::db(format!("storing vector for {memory_id}"), e))?;
-    Ok(())
+    fn max_input_tokens(&self) -> usize {
+        512
+    }
+
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text).await
+    }
+
+    async fn embed_document(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text).await
+    }
 }

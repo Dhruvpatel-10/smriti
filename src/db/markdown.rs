@@ -12,45 +12,62 @@ use tracing::instrument;
 use crate::config::AlertConfig;
 use crate::db::alerts;
 use crate::db::client::SurrealClient;
+use crate::db::BITEMPORAL_ACTIVE;
 use crate::error::{KbError, Result};
 
 /// Generate the compact markdown summary string.
 #[instrument(skip_all)]
 pub async fn generate_summary(db: &SurrealClient, alert_config: &AlertConfig) -> Result<String> {
+    // SurrealDB v3 requires every field referenced in ORDER BY to appear in
+    // the SELECT list.  We select the sort columns explicitly even when the
+    // rendering logic below does not use them directly.
     let priorities = query_rows(
         db,
-        "SELECT summary FROM memory
-         WHERE status = 'active' AND visibility = 'standard'
-           AND memory_type = 'working' AND subtype = 'priority'
-         ORDER BY importance DESC LIMIT 3",
+        &format!(
+            "SELECT summary, importance FROM memory
+             WHERE {BITEMPORAL_ACTIVE} AND visibility = 'standard'
+               AND memory_type = 'working' AND subtype = 'priority'
+             ORDER BY importance DESC LIMIT 3"
+        ),
+        "markdown: fetch active working/priority memories",
     )
     .await?;
 
     let key_memories = query_rows(
         db,
-        "SELECT summary, memory_type, project FROM memory
-         WHERE status = 'active' AND visibility = 'standard' AND importance >= 4
-         ORDER BY importance DESC, updated_at DESC LIMIT 5",
+        &format!(
+            "SELECT summary, memory_type, project, importance, updated_at FROM memory
+             WHERE {BITEMPORAL_ACTIVE} AND visibility = 'standard' AND importance >= 4
+             ORDER BY importance DESC, updated_at DESC LIMIT 5"
+        ),
+        "markdown: fetch high-importance memories",
     )
     .await?;
 
     let action_items = query_rows(
         db,
-        "SELECT summary, project FROM memory
-         WHERE status = 'active' AND visibility = 'standard'
-           AND memory_type = 'prospective' AND subtype = 'action_item'
-         ORDER BY importance DESC, event_at ASC LIMIT 5",
+        &format!(
+            "SELECT summary, project, importance, event_at FROM memory
+             WHERE {BITEMPORAL_ACTIVE} AND visibility = 'standard'
+               AND memory_type = 'prospective' AND subtype = 'action_item'
+             ORDER BY importance DESC, event_at ASC LIMIT 5"
+        ),
+        "markdown: fetch active action items",
     )
     .await?;
 
     let entities = query_rows(
         db,
-        "SELECT name, kind, context FROM entity
+        "SELECT name, kind, context, updated_at FROM entity
          ORDER BY updated_at DESC LIMIT 5",
+        "markdown: fetch recent entities",
     )
     .await?;
 
-    let alert_list = alerts::check_all(db, alert_config).await.unwrap_or_default();
+    let alert_list = alerts::check_all(db, alert_config).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "alert fetch failed during markdown regeneration; continuing with empty alerts");
+        Vec::new()
+    });
 
     let mut md = String::with_capacity(2048);
     md.push_str("# Knowledge Base Summary\n\n");
@@ -125,6 +142,12 @@ pub async fn generate_summary(db: &SurrealClient, alert_config: &AlertConfig) ->
 }
 
 /// Generate and write the summary to a file path.
+///
+/// # Path safety
+/// `output_path` is always derived from `MarkdownConfig::resolved_path()`, which
+/// expands `~/` against `$HOME` and returns a server-controlled `PathBuf`.  The
+/// `kb_regenerate_md` MCP tool takes zero user-supplied parameters, so there is
+/// no user-controlled path component here.  No `safe_filename` call is needed.
 #[instrument(skip(db, alert_config))]
 pub async fn regenerate_file(
     db: &SurrealClient,
@@ -154,11 +177,12 @@ pub async fn regenerate_file(
 async fn query_rows(
     db: &SurrealClient,
     sql: &str,
+    context: &str,
 ) -> Result<Vec<serde_json::Value>> {
     let mut result = db
         .query(sql)
         .await
-        .map_err(|e| KbError::db("markdown query", e))?;
+        .map_err(|e| KbError::db(context, e))?;
     let rows: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
     Ok(rows)
 }

@@ -4,6 +4,7 @@ use tracing::instrument;
 
 use crate::db::client::SurrealClient;
 use crate::db::memory::parse_memory_row;
+use crate::db::BITEMPORAL_ACTIVE;
 use crate::error::{KbError, Result};
 use crate::types::*;
 
@@ -21,7 +22,7 @@ use crate::types::*;
 pub async fn upsert(
     db: &SurrealClient,
     name: &str,
-    kind: &str,
+    kind: EntityKind,
     roles: Vec<String>,
     attrs: serde_json::Value,
     context: Option<String>,
@@ -89,12 +90,12 @@ pub async fn upsert(
     }
 }
 
-/// Get a single entity by its `EntityId`.
+/// Get a single entity by its `EntityId`. Returns NotFound if archived.
 #[instrument(skip(db))]
 pub async fn get(db: &SurrealClient, id: &EntityId) -> Result<Entity> {
     // Use the same record lookup pattern as memory::get
     let mut result = db
-        .query("SELECT * FROM type::record('entity', $id)")
+        .query("SELECT * FROM type::record('entity', $id) WHERE archived_at IS NONE")
         .bind(("id", id.as_str().to_string()))
         .await
         .map_err(|e| KbError::db(format!("getting entity {id}"), e))?;
@@ -107,9 +108,9 @@ pub async fn get(db: &SurrealClient, id: &EntityId) -> Result<Entity> {
         return parse_entity_row(row, id.as_str());
     }
 
-    // Fallback: query by record::id match
+    // Fallback: query by record::id match (also filters archived)
     let mut result = db
-        .query("SELECT * FROM entity WHERE record::id(id) = $id LIMIT 1")
+        .query("SELECT * FROM entity WHERE record::id(id) = $id AND archived_at IS NONE LIMIT 1")
         .bind(("id", id.as_str().to_string()))
         .await
         .map_err(|e| KbError::db(format!("getting entity {id} (fallback)"), e))?;
@@ -123,11 +124,11 @@ pub async fn get(db: &SurrealClient, id: &EntityId) -> Result<Entity> {
     parse_entity_row(row, id.as_str())
 }
 
-/// Get a single entity by its unique name.
+/// Get a single entity by its unique name. Returns NotFound if archived.
 #[instrument(skip(db, name))]
 pub async fn get_by_name(db: &SurrealClient, name: &str) -> Result<Entity> {
     let mut result = db
-        .query("SELECT * FROM entity WHERE name = $name LIMIT 1")
+        .query("SELECT * FROM entity WHERE name = $name AND archived_at IS NONE LIMIT 1")
         .bind(("name", name.to_string()))
         .await
         .map_err(|e| KbError::db(format!("getting entity by name '{name}'"), e))?;
@@ -180,11 +181,13 @@ pub async fn get_full(db: &SurrealClient, id: &EntityId) -> Result<EntityFull> {
 pub async fn find(
     db: &SurrealClient,
     query: &str,
-    kind: Option<&str>,
+    kind: Option<EntityKind>,
     role: Option<&str>,
 ) -> Result<Vec<EntitySummary>> {
-    let mut conditions =
-        vec!["string::lowercase(name) CONTAINS string::lowercase($query)".to_string()];
+    let mut conditions = vec![
+        "string::lowercase(name) CONTAINS string::lowercase($query)".to_string(),
+        "archived_at IS NONE".to_string(),
+    ];
     if kind.is_some() {
         conditions.push("kind = $kind".to_string());
     }
@@ -200,7 +203,7 @@ pub async fn find(
             kind,
             roles,
             context,
-            count(<-involves<-memory[WHERE status = 'active']) AS memory_count
+            count(<-involves<-memory[WHERE {BITEMPORAL_ACTIVE}]) AS memory_count
          FROM entity
          WHERE {where_sql}
          ORDER BY memory_count DESC
@@ -209,7 +212,7 @@ pub async fn find(
 
     let mut q = db.query(&sql).bind(("query", query.to_string()));
     if let Some(k) = kind {
-        q = q.bind(("kind", k.to_string()));
+        q = q.bind(("kind", k.as_str().to_string()));
     }
     if let Some(r) = role {
         q = q.bind(("role", r.to_string()));
@@ -231,6 +234,28 @@ pub async fn find(
     Ok(summaries)
 }
 
+/// Soft-archive an entity by setting `archived_at` and `archive_reason`.
+///
+/// Idempotent: returns Ok(false) if already archived or not found.
+/// Returns Ok(true) if the entity was archived by this call.
+#[instrument(skip(db))]
+pub async fn archive(db: &SurrealClient, id: &EntityId, reason: Option<&str>) -> Result<bool> {
+    let mut response = db
+        .query(
+            "UPDATE entity
+             SET archived_at    = time::now(),
+                 archive_reason = $reason
+             WHERE record::id(id) = $id AND archived_at IS NONE",
+        )
+        .bind(("id", id.as_str().to_string()))
+        .bind(("reason", reason.map(str::to_string)))
+        .await
+        .map_err(|e| KbError::db(format!("archiving entity {id}"), e))?;
+
+    let updated: Vec<serde_json::Value> = response.take(0usize).unwrap_or_default();
+    Ok(!updated.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -240,10 +265,10 @@ async fn count_memories(db: &SurrealClient, id: &EntityId) -> Result<u64> {
     let ent_rid = RecordId::new("entity", id.as_str());
 
     let mut result = db
-        .query(
-            "SELECT count(<-involves<-memory[WHERE status = 'active']) AS total
-             FROM $entity",
-        )
+        .query(format!(
+            "SELECT count(<-involves<-memory[WHERE {BITEMPORAL_ACTIVE}]) AS total
+             FROM $entity"
+        ))
         .bind(("entity", ent_rid))
         .await
         .map_err(|e| KbError::db(format!("counting memories for entity {id}"), e))?;
@@ -266,15 +291,15 @@ async fn recent_memories(
     let ent_rid = RecordId::new("entity", id.as_str());
 
     let mut result = db
-        .query(
+        .query(format!(
             "SELECT *
              FROM memory
              WHERE id IN (SELECT in FROM involves WHERE out = $entity).in
-               AND status = 'active'
+               AND {BITEMPORAL_ACTIVE}
                AND visibility = 'standard'
              ORDER BY event_at DESC
-             LIMIT $n",
-        )
+             LIMIT $n"
+        ))
         .bind(("entity", ent_rid))
         .bind(("n", n))
         .await
@@ -363,28 +388,7 @@ fn extract_id_str(row: &serde_json::Value) -> Option<String> {
 }
 
 /// Convert a SurrealDB record-id value to a plain string, stripping the
-/// `{table}:` prefix when present.
-///
-/// SurrealDB v3 may return the id in several shapes:
-/// - A JSON string `"entity:ent_abc123"`
-/// - A record-id object `{ "tb": "entity", "id": { "String": "ent_abc123" } }`
+/// `{table}:` prefix when present, or falling back to the supplied id.
 fn normalise_record_id(id_val: &serde_json::Value, table: &str, fallback: &str) -> String {
-    let prefix = format!("{table}:");
-    match id_val {
-        serde_json::Value::String(s) => s
-            .strip_prefix(&prefix)
-            .unwrap_or(s)
-            .to_string(),
-        serde_json::Value::Object(obj) => obj
-            .get("id")
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Object(inner) => inner
-                    .get("String")
-                    .and_then(|s| s.as_str().map(String::from)),
-                _ => None,
-            })
-            .unwrap_or_else(|| fallback.to_string()),
-        _ => fallback.to_string(),
-    }
+    crate::db::helpers::record_id_bare(id_val, table).unwrap_or_else(|| fallback.to_string())
 }

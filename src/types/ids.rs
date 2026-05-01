@@ -72,6 +72,45 @@ impl From<String> for EntityId {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AgentId newtype
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct AgentId(pub String);
+
+impl AgentId {
+    pub fn new() -> Self {
+        Self(format!("agent_{}", uuid::Uuid::new_v4().as_simple()))
+    }
+
+    pub fn from_string(s: String) -> Self {
+        Self(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for AgentId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

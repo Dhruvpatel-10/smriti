@@ -3,8 +3,9 @@ use tracing::instrument;
 
 use crate::config::AlertConfig;
 use crate::db::client::SurrealClient;
+use crate::db::BITEMPORAL_ACTIVE;
 use crate::error::{KbError, Result};
-use crate::types::{Alert, AlertType};
+use crate::types::{Alert, AlertReference, AlertType, MemoryId};
 
 /// Run all alert checks and return the combined list.
 #[instrument(skip_all)]
@@ -15,6 +16,7 @@ pub async fn check_all(db: &SurrealClient, config: &AlertConfig) -> Result<Vec<A
     alerts.extend(check_expiring_memories(db, config.expiring_memory_hours).await?);
     alerts.extend(check_stale_contacts(db, config.stale_contact_days).await?);
     alerts.extend(check_unsuperseded_updates(db).await?);
+    alerts.extend(check_extraction_backlog(db, config.extraction_backlog_threshold).await?);
 
     tracing::info!(count = alerts.len(), "alert check complete");
     Ok(alerts)
@@ -26,14 +28,14 @@ async fn check_overdue_actions(db: &SurrealClient, days: u64) -> Result<Vec<Aler
     let cutoff = Utc::now() - Duration::days(days as i64);
 
     let mut result = db
-        .query(
+        .query(format!(
             "SELECT * FROM memory
-             WHERE status = 'active'
+             WHERE {BITEMPORAL_ACTIVE}
                AND visibility = 'standard'
                AND memory_type = 'prospective'
                AND subtype = 'action_item'
-               AND event_at < $cutoff",
-        )
+               AND event_at < $cutoff"
+        ))
         // Bind DateTime<Utc> directly — do NOT go through serde_json::to_value,
         // which would produce a string that SurrealDB v3 won't coerce for
         // datetime comparisons.
@@ -56,10 +58,12 @@ async fn check_overdue_actions(db: &SurrealClient, days: u64) -> Result<Vec<Aler
             .unwrap_or("(no summary)")
             .to_string();
 
+        // Summary is safe to include — WHERE clause gates on visibility = 'standard'
+        // before any row reaches this point (Wave C visibility fix).
         alerts.push(Alert {
             alert_type: AlertType::OverdueActionItem,
             message: format!("Action item overdue: {summary}"),
-            reference_id: id,
+            reference: AlertReference::Memory(MemoryId::from(id)),
             created_at: now,
         });
     }
@@ -74,14 +78,14 @@ async fn check_expiring_memories(db: &SurrealClient, hours: u64) -> Result<Vec<A
     let horizon = now + Duration::hours(hours as i64);
 
     let mut result = db
-        .query(
+        .query(format!(
             "SELECT * FROM memory
-             WHERE status = 'active'
+             WHERE {BITEMPORAL_ACTIVE}
                AND visibility = 'standard'
                AND expires_at != NONE
                AND expires_at <= $horizon
-               AND expires_at > $now",
-        )
+               AND expires_at > $now"
+        ))
         .bind(("horizon", horizon))
         .bind(("now", now))
         .await
@@ -101,10 +105,12 @@ async fn check_expiring_memories(db: &SurrealClient, hours: u64) -> Result<Vec<A
             .unwrap_or("(no summary)")
             .to_string();
 
+        // Summary is safe to include — WHERE clause gates on visibility = 'standard'
+        // before any row reaches this point (Wave C visibility fix).
         alerts.push(Alert {
             alert_type: AlertType::ExpiringMemory,
             message: format!("Memory expiring soon: {summary}"),
-            reference_id: id,
+            reference: AlertReference::Memory(MemoryId::from(id)),
             created_at: now,
         });
     }
@@ -139,10 +145,15 @@ async fn check_stale_contacts(db: &SurrealClient, days: u64) -> Result<Vec<Alert
 
     for row in rows {
         let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-        let last_contact_str = row.get("last_contact").and_then(|v| v.as_str());
 
-        if let Some(lc) = last_contact_str
-            && let Ok(last_contact) = lc.parse::<chrono::DateTime<Utc>>()
+        // last_contact is stored as an RFC-3339 string in attrs (FLEXIBLE object).
+        // Parse it here; skip rows where the value is absent or unparseable.
+        let last_contact_opt: Option<chrono::DateTime<Utc>> = row
+            .get("last_contact")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+
+        if let Some(last_contact) = last_contact_opt
             && last_contact < cutoff
         {
             alerts.push(Alert {
@@ -151,7 +162,7 @@ async fn check_stale_contacts(db: &SurrealClient, days: u64) -> Result<Vec<Alert
                     "No contact with {name} since {}",
                     last_contact.format("%Y-%m-%d")
                 ),
-                reference_id: name.to_string(),
+                reference: AlertReference::EntityName(name.to_string()),
                 created_at: now,
             });
         }
@@ -175,7 +186,7 @@ async fn check_unsuperseded_updates(db: &SurrealClient) -> Result<Vec<Alert>> {
                 in.summary AS new_summary,
                 out.summary AS old_summary
              FROM updates
-             WHERE out.status = 'active'
+             WHERE out.invalidated_at IS NONE
                AND out.visibility = 'standard'
                AND in.visibility = 'standard'
              LIMIT 10",
@@ -207,12 +218,15 @@ async fn check_unsuperseded_updates(db: &SurrealClient) -> Result<Vec<Alert>> {
             .unwrap_or("(no summary)")
             .to_string();
 
+        // Both summaries are safe to include — WHERE clause gates on
+        // out.visibility = 'standard' AND in.visibility = 'standard'
+        // before any row reaches this point (Wave C visibility fix).
         alerts.push(Alert {
             alert_type: AlertType::Contradiction,
             message: format!(
                 "Memory still active despite being updated: \"{old_summary}\" superseded by \"{new_summary}\""
             ),
-            reference_id: old_id,
+            reference: AlertReference::Memory(MemoryId::from(old_id)),
             created_at: now,
         });
     }
@@ -220,30 +234,53 @@ async fn check_unsuperseded_updates(db: &SurrealClient) -> Result<Vec<Alert>> {
     Ok(alerts)
 }
 
+/// Return an ExtractionBacklog alert when the count of memories with a failed
+/// extraction status exceeds the configured threshold.
+///
+/// Retryable statuses: anchor_failed, relation_failed, both_failed, sidecar_unavailable.
+/// `pending` and `complete` and `skipped` are NOT included — only genuine failures.
+async fn check_extraction_backlog(db: &SurrealClient, threshold: u64) -> Result<Vec<Alert>> {
+    let mut result = db
+        .query(format!(
+            "SELECT count() AS total FROM memory
+             WHERE {BITEMPORAL_ACTIVE}
+               AND extraction_status IN ['anchor_failed', 'relation_failed', 'both_failed', 'sidecar_unavailable']
+             GROUP ALL"
+        ))
+        .await
+        .map_err(|e| KbError::db("check_extraction_backlog query", e))?;
+
+    let row: Option<serde_json::Value> = result
+        .take(0)
+        .map_err(|e| KbError::db("deserializing extraction backlog count", e))?;
+
+    let count = row
+        .and_then(|v| v.get("total").and_then(|t| t.as_u64()))
+        .unwrap_or(0);
+
+    if count > threshold {
+        let now = Utc::now();
+        return Ok(vec![Alert {
+            alert_type: AlertType::ExtractionBacklog,
+            message: format!(
+                "{count} memories have failed extraction status (threshold: {threshold}). \
+                 Run --retry-failed-extraction to clear."
+            ),
+            reference: AlertReference::Count(count.to_string()),
+            created_at: now,
+        }]);
+    }
+
+    Ok(vec![])
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the bare ID string from a SurrealDB result row.
-///
-/// SurrealDB may return `id` as a plain string (`"memory:abc"`), or as a
-/// record-id object (`{"tb": "memory", "id": {"String": "abc"}}`).  Both
-/// forms are normalised to the bare key without the table prefix.
+/// Extract the bare memory ID string from a SurrealDB result row.
 fn extract_id(row: &serde_json::Value) -> String {
-    match row.get("id") {
-        Some(serde_json::Value::String(s)) => {
-            s.strip_prefix("memory:").unwrap_or(s).to_string()
-        }
-        Some(serde_json::Value::Object(obj)) => obj
-            .get("id")
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Object(inner) => {
-                    inner.get("String").and_then(|s| s.as_str().map(String::from))
-                }
-                _ => None,
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
+    row.get("id")
+        .and_then(|v| crate::db::helpers::record_id_bare(v, "memory"))
+        .unwrap_or_default()
 }

@@ -66,7 +66,7 @@ pub async fn link_entity(
     .bind(("now", now))
     .bind(("now_str", now_str))
     .await
-    .map_err(|e| KbError::db(format!("upserting entity {entity_name}"), e))?;
+    .map_err(|e| KbError::db("upserting entity", e))?;
 
     // v3: RELATE subject must be a proper RecordId, not type::record().
     // IF/ELSE uses curly-brace blocks (no THEN...END).
@@ -82,7 +82,7 @@ pub async fn link_entity(
     .bind(("name", entity_name.to_string()))
     .bind(("mem_record", mem_rid))
     .await
-    .map_err(|e| KbError::db(format!("linking memory {memory_id} to entity {entity_name}"), e))?;
+    .map_err(|e| KbError::db(format!("linking memory {memory_id} to entity"), e))?;
 
     // Consume all statements to surface embedded SurrealQL errors.
     let _: Vec<serde_json::Value> = response.take(0usize).unwrap_or_default();
@@ -111,7 +111,7 @@ pub async fn link_assigned(
     .bind(("now", now))
     .bind(("now_str", now_str))
     .await
-    .map_err(|e| KbError::db(format!("upserting entity for assignment {entity_name}"), e))?;
+    .map_err(|e| KbError::db("upserting entity for assignment", e))?;
 
     let mem_rid = RecordId::new("memory", memory_id.as_str());
     let mut response = db.query(
@@ -124,7 +124,7 @@ pub async fn link_assigned(
     .bind(("name", entity_name.to_string()))
     .bind(("mem_record", mem_rid))
     .await
-    .map_err(|e| KbError::db(format!("assigning memory {memory_id} to entity {entity_name}"), e))?;
+    .map_err(|e| KbError::db(format!("assigning memory {memory_id} to entity"), e))?;
 
     let _: Vec<serde_json::Value> = response.take(0usize).unwrap_or_default();
     let _: Vec<serde_json::Value> = response.take(1usize).unwrap_or_default();

@@ -1,9 +1,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::enums::ExportEntryType;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEntry {
-    pub entry_type: String,
+    pub entry_type: ExportEntryType,
     pub data: serde_json::Value,
 }
 

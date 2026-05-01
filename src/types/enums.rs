@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
 // Memory type + subtype
@@ -27,17 +28,21 @@ impl MemoryType {
             Self::Working,
         ]
     }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::Procedural => "procedural",
+            Self::Prospective => "prospective",
+            Self::Working => "working",
+        }
+    }
 }
 
 impl fmt::Display for MemoryType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Episodic => write!(f, "episodic"),
-            Self::Semantic => write!(f, "semantic"),
-            Self::Procedural => write!(f, "procedural"),
-            Self::Prospective => write!(f, "prospective"),
-            Self::Working => write!(f, "working"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -74,37 +79,35 @@ pub enum MemorySubtype {
     Hypothesis,
 }
 
-impl fmt::Display for MemorySubtype {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl MemorySubtype {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Meeting => write!(f, "meeting"),
-            Self::Conversation => write!(f, "conversation"),
-            Self::DailyLog => write!(f, "daily_log"),
-            Self::Reflection => write!(f, "reflection"),
-            Self::Session => write!(f, "session"),
-            Self::Research => write!(f, "research"),
-            Self::Decision => write!(f, "decision"),
-            Self::Fact => write!(f, "fact"),
-            Self::Preference => write!(f, "preference"),
-            Self::Value => write!(f, "value"),
-            Self::Metric => write!(f, "metric"),
-            Self::Pattern => write!(f, "pattern"),
-            Self::Workflow => write!(f, "workflow"),
-            Self::Skill => write!(f, "skill"),
-            Self::ActionItem => write!(f, "action_item"),
-            Self::Goal => write!(f, "goal"),
-            Self::LifeGoal => write!(f, "life_goal"),
-            Self::Experiment => write!(f, "experiment"),
-            Self::Priority => write!(f, "priority"),
-            Self::OpenQuestion => write!(f, "open_question"),
-            Self::Scratch => write!(f, "scratch"),
-            Self::Signal => write!(f, "signal"),
-            Self::Hypothesis => write!(f, "hypothesis"),
+            Self::Meeting => "meeting",
+            Self::Conversation => "conversation",
+            Self::DailyLog => "daily_log",
+            Self::Reflection => "reflection",
+            Self::Session => "session",
+            Self::Research => "research",
+            Self::Decision => "decision",
+            Self::Fact => "fact",
+            Self::Preference => "preference",
+            Self::Value => "value",
+            Self::Metric => "metric",
+            Self::Pattern => "pattern",
+            Self::Workflow => "workflow",
+            Self::Skill => "skill",
+            Self::ActionItem => "action_item",
+            Self::Goal => "goal",
+            Self::LifeGoal => "life_goal",
+            Self::Experiment => "experiment",
+            Self::Priority => "priority",
+            Self::OpenQuestion => "open_question",
+            Self::Scratch => "scratch",
+            Self::Signal => "signal",
+            Self::Hypothesis => "hypothesis",
         }
     }
-}
 
-impl MemorySubtype {
     /// All valid subtypes for a given type. Single source of truth —
     /// `valid_for()` and the LLM classify prompt both derive from this.
     pub const fn all_for(ty: MemoryType) -> &'static [MemorySubtype] {
@@ -132,34 +135,123 @@ impl MemorySubtype {
     pub fn valid_for(self, ty: MemoryType) -> bool {
         Self::all_for(ty).contains(&self)
     }
+
+    /// Returns true for subtypes that are immune to SM-2 decay regardless of
+    /// importance. Kept here so rename refactors catch every reference.
+    pub fn is_immune(self) -> bool {
+        matches!(self, Self::Decision | Self::Value | Self::LifeGoal)
+    }
+
+    /// Canonical string representations of all immune subtypes, derived from
+    /// the enum variants. Use as a bind parameter — never interpolate.
+    pub fn immune_strs() -> Vec<&'static str> {
+        [Self::Decision, Self::Value, Self::LifeGoal]
+            .iter()
+            .map(|s| s.as_str())
+            .collect()
+    }
+}
+
+impl fmt::Display for MemorySubtype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Memory status
 // ---------------------------------------------------------------------------
 
+/// Lifecycle state of a memory record.
+///
+/// ADR-011 collapsed the former `Superseded` status into `Archived` — the
+/// reason a memory was archived is carried by `invalidation_reason` (a
+/// separate enum), not by the status. Status is a derived index hint:
+/// `status='archived'` iff `invalidated_at IS NOT NONE`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
     #[default]
     Active,
     Archived,
-    Superseded,
 }
 
 // ---------------------------------------------------------------------------
-// Source (input channel)
+// Channel (where bytes came from)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Source {
-    Manual,
-    Meeting,
+pub enum Channel {
+    Cli,
     Slack,
     Discord,
+    Email,
+    Sms,
+    Web,
+    Api,
+    Github,
+    VoiceApp,
+    Notion,
+    Calendar,
+}
+
+impl Channel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Slack => "slack",
+            Self::Discord => "discord",
+            Self::Email => "email",
+            Self::Sms => "sms",
+            Self::Web => "web",
+            Self::Api => "api",
+            Self::Github => "github",
+            Self::VoiceApp => "voice_app",
+            Self::Notion => "notion",
+            Self::Calendar => "calendar",
+        }
+    }
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Modality (what shape the bytes were in)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Text,
+    Transcript,
+    Document,
     Code,
-    Chat,
+    Structured,
+    Image,
+}
+
+impl Modality {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Transcript => "transcript",
+            Self::Document => "document",
+            Self::Code => "code",
+            Self::Structured => "structured",
+            Self::Image => "image",
+        }
+    }
+}
+
+impl fmt::Display for Modality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,13 +267,19 @@ pub enum Visibility {
     Sensitive,
 }
 
+impl Visibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Private => "private",
+            Self::Sensitive => "sensitive",
+        }
+    }
+}
+
 impl fmt::Display for Visibility {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Standard => write!(f, "standard"),
-            Self::Private => write!(f, "private"),
-            Self::Sensitive => write!(f, "sensitive"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -202,6 +300,90 @@ pub enum RecallScope {
 }
 
 // ---------------------------------------------------------------------------
+// Entity kind
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityKind {
+    Person,
+    Company,
+    Organization,
+    Project,
+    Place,
+    Tool,
+    Concept,
+    Product,
+}
+
+impl EntityKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Company => "company",
+            Self::Organization => "organization",
+            Self::Project => "project",
+            Self::Place => "place",
+            Self::Tool => "tool",
+            Self::Concept => "concept",
+            Self::Product => "product",
+        }
+    }
+}
+
+impl fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EntityKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "person" => Ok(Self::Person),
+            "company" => Ok(Self::Company),
+            "organization" => Ok(Self::Organization),
+            "project" => Ok(Self::Project),
+            "place" => Ok(Self::Place),
+            "tool" => Ok(Self::Tool),
+            "concept" => Ok(Self::Concept),
+            "product" => Ok(Self::Product),
+            other => Err(format!(
+                "unknown entity kind '{other}'; valid values: person, company, organization, project, place, tool, concept, product"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Export entry type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportEntryType {
+    Memory,
+    Entity,
+}
+
+impl ExportEntryType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Entity => "entity",
+        }
+    }
+}
+
+impl fmt::Display for ExportEntryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Relation types for graph edges
 // ---------------------------------------------------------------------------
 
@@ -217,18 +399,240 @@ pub enum RelationType {
     Belongs,
 }
 
-impl fmt::Display for RelationType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl RelationType {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Updates => write!(f, "updates"),
-            Self::Extends => write!(f, "extends"),
-            Self::Derives => write!(f, "derives"),
-            Self::Relates => write!(f, "relates"),
-            Self::Involves => write!(f, "involves"),
-            Self::Assigned => write!(f, "assigned"),
-            Self::Belongs => write!(f, "belongs"),
+            Self::Updates => "updates",
+            Self::Extends => "extends",
+            Self::Derives => "derives",
+            Self::Relates => "relates",
+            Self::Involves => "involves",
+            Self::Assigned => "assigned",
+            Self::Belongs => "belongs",
         }
     }
+}
+
+impl fmt::Display for RelationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Archive reason (for kb_archive tool — forget or retract)
+// ---------------------------------------------------------------------------
+
+/// The caller's intent when archiving a memory.
+///
+/// `Forget` means "no longer relevant" (sets `InvalidationReason::Forgotten`).
+/// `Retract` means "I was explicitly wrong" (sets `InvalidationReason::Retracted`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveReason {
+    Forget,
+    Retract,
+}
+
+// ---------------------------------------------------------------------------
+// Invalidation reason (bitemporal, ADR-011)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidationReason {
+    Superseded,   // replaced by newer memory via updates_id
+    Retracted,    // user explicitly marked wrong
+    Expired,      // TTL reached (working memory)
+    Forgotten,    // user kb_forget — no longer relevant, not necessarily wrong
+    Consolidated, // merged into another memory via kb_consolidate
+}
+
+impl InvalidationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::Retracted => "retracted",
+            Self::Expired => "expired",
+            Self::Forgotten => "forgotten",
+            Self::Consolidated => "consolidated",
+        }
+    }
+}
+
+impl fmt::Display for InvalidationReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for InvalidationReason {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "superseded" => Ok(Self::Superseded),
+            "retracted" => Ok(Self::Retracted),
+            "expired" => Ok(Self::Expired),
+            "forgotten" => Ok(Self::Forgotten),
+            "consolidated" => Ok(Self::Consolidated),
+            other => Err(format!(
+                "unknown invalidation reason '{other}'; valid values: superseded, retracted, expired, forgotten, consolidated"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RelationKind — LLM-extracted typed relations between memories
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationKind {
+    Causes,
+    Enables,
+    Blocks,
+    Follows,
+    Precedes,
+    SimilarTo,
+    Contradicts,
+    Mentions,
+    DependsOn,
+    PartOf,
+}
+
+impl RelationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Causes => "causes",
+            Self::Enables => "enables",
+            Self::Blocks => "blocks",
+            Self::Follows => "follows",
+            Self::Precedes => "precedes",
+            Self::SimilarTo => "similar_to",
+            Self::Contradicts => "contradicts",
+            Self::Mentions => "mentions",
+            Self::DependsOn => "depends_on",
+            Self::PartOf => "part_of",
+        }
+    }
+}
+
+impl fmt::Display for RelationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RelationKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "causes" => Ok(Self::Causes),
+            "enables" => Ok(Self::Enables),
+            "blocks" => Ok(Self::Blocks),
+            "follows" => Ok(Self::Follows),
+            "precedes" => Ok(Self::Precedes),
+            "similar_to" => Ok(Self::SimilarTo),
+            "contradicts" => Ok(Self::Contradicts),
+            "mentions" => Ok(Self::Mentions),
+            "depends_on" => Ok(Self::DependsOn),
+            "part_of" => Ok(Self::PartOf),
+            other => Err(format!(
+                "unknown relation kind '{other}'; valid values: causes, enables, blocks, follows, precedes, similar_to, contradicts, mentions, depends_on, part_of"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExtractionStatus — tracks post-create sidecar extraction state per memory
+// ---------------------------------------------------------------------------
+
+/// Tracks whether the post-create LLM sidecar extraction pipeline has run for
+/// a memory record. Set to `Pending` at create time; updated by the async task.
+///
+/// Invariant: `complete` is the only terminal-success state. All `*_failed`
+/// variants are retryable via `--retry-failed-extraction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionStatus {
+    /// Default at create time — sidecar task not yet attempted.
+    Pending,
+    /// Both anchor and typed-relation extraction succeeded.
+    Complete,
+    /// Anchor extraction errored; typed-relation may or may not have run.
+    AnchorFailed,
+    /// Typed-relation extraction errored; anchor succeeded.
+    RelationFailed,
+    /// Both anchor and typed-relation extraction errored.
+    BothFailed,
+    /// Circuit breaker open or sidecar process unavailable — no attempt made.
+    SidecarUnavailable,
+    /// Memory is Sensitive visibility — extraction skipped by policy (not a failure).
+    Skipped,
+}
+
+impl ExtractionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Complete => "complete",
+            Self::AnchorFailed => "anchor_failed",
+            Self::RelationFailed => "relation_failed",
+            Self::BothFailed => "both_failed",
+            Self::SidecarUnavailable => "sidecar_unavailable",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    /// Returns true when the status represents a failure that can be retried.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::AnchorFailed | Self::RelationFailed | Self::BothFailed | Self::SidecarUnavailable
+        )
+    }
+}
+
+impl fmt::Display for ExtractionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ExtractionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "complete" => Ok(Self::Complete),
+            "anchor_failed" => Ok(Self::AnchorFailed),
+            "relation_failed" => Ok(Self::RelationFailed),
+            "both_failed" => Ok(Self::BothFailed),
+            "sidecar_unavailable" => Ok(Self::SidecarUnavailable),
+            "skipped" => Ok(Self::Skipped),
+            other => Err(format!(
+                "unknown extraction status '{other}'; valid: pending, complete, anchor_failed, relation_failed, both_failed, sidecar_unavailable, skipped"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reranker policy (ADR-022)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankerPolicy {
+    Always,
+    #[default]
+    Adaptive,
+    Never,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +665,50 @@ impl Default for Importance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Importance -------------------------------------------------------
+
+    // -- InvalidationReason -----------------------------------------------
+
+    #[test]
+    fn invalidation_reason_serde_roundtrip_all_variants() {
+        let all = [
+            InvalidationReason::Superseded,
+            InvalidationReason::Retracted,
+            InvalidationReason::Expired,
+            InvalidationReason::Forgotten,
+            InvalidationReason::Consolidated,
+        ];
+        for variant in &all {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: InvalidationReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back, "serde roundtrip failed for {variant:?}");
+        }
+    }
+
+    #[test]
+    fn invalidation_reason_from_str_roundtrip() {
+        let all = [
+            (InvalidationReason::Superseded, "superseded"),
+            (InvalidationReason::Retracted, "retracted"),
+            (InvalidationReason::Expired, "expired"),
+            (InvalidationReason::Forgotten, "forgotten"),
+            (InvalidationReason::Consolidated, "consolidated"),
+        ];
+        for (variant, s) in &all {
+            let parsed: InvalidationReason = s.parse().unwrap();
+            assert_eq!(parsed, *variant, "FromStr failed for '{s}'");
+        }
+    }
+
+    #[test]
+    fn invalidation_reason_display() {
+        assert_eq!(format!("{}", InvalidationReason::Superseded), "superseded");
+        assert_eq!(format!("{}", InvalidationReason::Retracted), "retracted");
+        assert_eq!(format!("{}", InvalidationReason::Expired), "expired");
+        assert_eq!(format!("{}", InvalidationReason::Forgotten), "forgotten");
+        assert_eq!(format!("{}", InvalidationReason::Consolidated), "consolidated");
+    }
 
     // -- Importance -------------------------------------------------------
 
@@ -423,10 +871,32 @@ mod tests {
     }
 
     #[test]
-    fn source_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&Source::Manual).unwrap(), "\"manual\"");
-        assert_eq!(serde_json::to_string(&Source::Code).unwrap(), "\"code\"");
-        assert_eq!(serde_json::to_string(&Source::Chat).unwrap(), "\"chat\"");
+    fn channel_snake_case_roundtrip() {
+        let all = [
+            Channel::Cli, Channel::Slack, Channel::Discord, Channel::Email,
+            Channel::Sms, Channel::Web, Channel::Api, Channel::Github,
+            Channel::VoiceApp, Channel::Notion, Channel::Calendar,
+        ];
+        for variant in &all {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: Channel = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back, "serde roundtrip failed for {variant:?}");
+            assert_eq!(variant.as_str(), variant.to_string().as_str());
+        }
+    }
+
+    #[test]
+    fn modality_snake_case_roundtrip() {
+        let all = [
+            Modality::Text, Modality::Transcript, Modality::Document,
+            Modality::Code, Modality::Structured, Modality::Image,
+        ];
+        for variant in &all {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: Modality = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back, "serde roundtrip failed for {variant:?}");
+            assert_eq!(variant.as_str(), variant.to_string().as_str());
+        }
     }
 
     #[test]
@@ -476,8 +946,8 @@ mod tests {
 
     #[test]
     fn memory_status_serde() {
+        assert_eq!(serde_json::to_string(&MemoryStatus::Active).unwrap(), "\"active\"");
         assert_eq!(serde_json::to_string(&MemoryStatus::Archived).unwrap(), "\"archived\"");
-        assert_eq!(serde_json::to_string(&MemoryStatus::Superseded).unwrap(), "\"superseded\"");
     }
 
     #[test]
@@ -490,5 +960,55 @@ mod tests {
     fn memory_subtype_display() {
         assert_eq!(format!("{}", MemorySubtype::DailyLog), "daily_log");
         assert_eq!(format!("{}", MemorySubtype::ActionItem), "action_item");
+    }
+
+    #[test]
+    fn as_str_matches_display_memory_type() {
+        for &v in MemoryType::all() {
+            assert_eq!(v.as_str(), v.to_string().as_str());
+        }
+    }
+
+    #[test]
+    fn as_str_matches_display_memory_subtype() {
+        let all = [
+            MemorySubtype::Meeting, MemorySubtype::Conversation, MemorySubtype::DailyLog,
+            MemorySubtype::Reflection, MemorySubtype::Session, MemorySubtype::Research,
+            MemorySubtype::Decision, MemorySubtype::Fact, MemorySubtype::Preference,
+            MemorySubtype::Value, MemorySubtype::Metric, MemorySubtype::Pattern,
+            MemorySubtype::Workflow, MemorySubtype::Skill, MemorySubtype::ActionItem,
+            MemorySubtype::Goal, MemorySubtype::LifeGoal, MemorySubtype::Experiment,
+            MemorySubtype::Priority, MemorySubtype::OpenQuestion, MemorySubtype::Scratch,
+            MemorySubtype::Signal, MemorySubtype::Hypothesis,
+        ];
+        for v in all {
+            assert_eq!(v.as_str(), v.to_string().as_str());
+        }
+    }
+
+    #[test]
+    fn as_str_matches_display_relation_type() {
+        let all = [
+            RelationType::Updates, RelationType::Extends, RelationType::Derives,
+            RelationType::Relates, RelationType::Involves, RelationType::Assigned,
+            RelationType::Belongs,
+        ];
+        for v in all {
+            assert_eq!(v.as_str(), v.to_string().as_str());
+        }
+    }
+
+    #[test]
+    fn as_str_matches_display_visibility() {
+        let all = [Visibility::Standard, Visibility::Private, Visibility::Sensitive];
+        for v in all {
+            assert_eq!(v.as_str(), v.to_string().as_str());
+        }
+    }
+
+    #[test]
+    fn immune_strs_returns_static_strs() {
+        let strs = MemorySubtype::immune_strs();
+        assert_eq!(strs, vec!["decision", "value", "life_goal"]);
     }
 }
