@@ -23,7 +23,14 @@ pub struct ExportOutput {
     pub result: ExportResult,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_export"))]
+#[tracing::instrument(
+    name = "kb_export",
+    skip_all,
+    fields(
+        has_filename = input.filename.is_some(),
+        exclude_sensitive = input.exclude_sensitive,
+    )
+)]
 pub async fn execute_export(
     db: &SurrealClient,
     export_dir: &std::path::Path,
@@ -56,7 +63,7 @@ pub struct ImportOutput {
     pub result: ImportResult,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_import"))]
+#[tracing::instrument(name = "kb_import", skip_all)]
 pub async fn execute_import(
     db: &SurrealClient,
     export_dir: &std::path::Path,

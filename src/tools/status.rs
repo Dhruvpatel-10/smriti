@@ -13,7 +13,14 @@ pub struct StatusInput {
     pub domain: Option<String>,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_status"))]
+#[tracing::instrument(
+    name = "kb_status",
+    skip_all,
+    fields(
+        project = input.project.as_deref().unwrap_or(""),
+        has_domain_filter = input.domain.is_some(),
+    )
+)]
 pub async fn execute(db: &SurrealClient, input: StatusInput) -> Result<StatusReport> {
     search::status_query(db, input.project.as_deref(), input.domain.as_deref()).await
 }

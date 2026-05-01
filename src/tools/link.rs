@@ -20,7 +20,15 @@ pub struct LinkOutput {
     pub message: String,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_link"))]
+#[tracing::instrument(
+    name = "kb_link",
+    skip_all,
+    fields(
+        from_id = %input.from_id,
+        to_id = %input.to_id,
+        relation = ?input.relation,
+    )
+)]
 pub async fn execute(db: &SurrealClient, input: LinkInput) -> Result<LinkOutput> {
     let from = MemoryId::from(input.from_id);
     let to = MemoryId::from(input.to_id);

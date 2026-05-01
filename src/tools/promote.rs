@@ -16,7 +16,11 @@ pub struct PromoteOutput {
     pub message: String,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_promote"))]
+#[tracing::instrument(
+    name = "kb_promote",
+    skip_all,
+    fields(id = %input.id)
+)]
 pub async fn execute(db: &SurrealClient, input: PromoteInput) -> Result<PromoteOutput> {
     let id = MemoryId::from(input.id);
     memory::promote(db, &id).await?;

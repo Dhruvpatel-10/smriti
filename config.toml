@@ -23,10 +23,61 @@ backup_dir = "archive/exports"
 exclude_sensitive = true
 
 [embeddings]
-enabled = false
-model = "embeddinggemma-300m"
-dimensions = 256  # MRL truncation (768 full, 256 = best quality/storage ratio)
+enabled = true
+provider = "voyage"            # "local" (fastembed) or "voyage" (cloud, ADR-016)
+model = "voyage-4-large"       # ignored when provider=local
+dimensions = 1024              # Voyage native; MRL truncatable to 256/512/2048
+
+[embeddings.voyage]
+# api_key set via VOYAGE_API_KEY env var (preferred); inline only for local dev
+model = "voyage-4-large"
+output_dimension = 1024
+request_timeout_ms = 30000
+accepted_terms = true          # ADR-016: paid-tier privacy gate (card on file = no-training)
+
+[embeddings.voyage.reranker]
+enabled = true
+model = "rerank-2.5-lite"
+top_k_input = 50               # full RRF pool, no narrowing (ADR-017)
+policy = "adaptive"            # "always" | "adaptive" (default) | "never" — ADR-022
 
 [markdown]
 enabled = true
 output_path = "~/.claude/CLAUDE.md"
+
+# [llm]
+# enabled = true
+# sidecar_path = "sidecar/dist/index.js"
+# confidence_threshold = 0.7
+# request_timeout_ms = 30000
+# max_consecutive_failures = 5
+
+# Auto-consolidation via LLM sidecar (wave 3 will wire the merge loop).
+# Requires llm.enabled = true. Each [consolidation] client has its own
+# circuit breaker — a failure burst here cannot disable kb_remember extraction.
+# [consolidation]
+# auto_enabled = false          # set true to enable periodic LLM-driven merges
+# min_age_days = 7              # only consider memories older than this
+# min_confidence = 0.75         # skip merge when sidecar confidence is below floor
+# max_per_tick = 5              # max clusters merged per periodic tick
+# max_cluster_size = 12         # max summaries per cluster sent to sidecar
+# cooldown_days = 7             # days before re-evaluating a skipped cluster
+
+# Spreading activation weights (ADR-023). All fields optional — omit to use defaults.
+# [search.spreading]
+# cap = 3          # max neighbors added per recall (default 3)
+# hop_decay = 0.5  # score decay per hop; neighbour_score = parent × weight × hop_decay^depth
+#
+# [search.spreading.edge_weights]
+# derives = 1.0            # causal provenance (sidecar) — full propagation
+# extends = 0.8            # intentional structural link
+# updates = 0.8            # explicit version chain
+# relates = 0.5            # general declared link
+# involves = 0.3           # entity co-occurrence (auto-linked) — suppresses super-hub dominance
+# typed_relation_max = 0.9 # multiplied by sidecar confidence; high-conf → near-derives strength
+
+# Fusion strategy for combining BM25 and vector result lists (arxiv:2210.11934).
+# [search.fusion]
+# strategy = "rrf"               # "rrf" (default) | "convex_combination"
+# vector_weight = 0.7            # CC only: α for vector score; BM25 weight = 1-α; range [0.0, 1.0]
+# min_score = 0.0                # CC only: drop items below this fused score; 0.0 = no floor

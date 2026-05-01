@@ -29,15 +29,27 @@ pub struct EntityUpsertOutput {
     pub message: String,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_entity_upsert"))]
+#[tracing::instrument(
+    name = "kb_entity_upsert",
+    skip_all,
+    fields(
+        kind = %input.kind,
+        has_roles = input.roles.is_some(),
+        has_attrs = input.attrs.is_some(),
+        has_context = input.context.is_some(),
+    )
+)]
 pub async fn execute_upsert(
     db: &SurrealClient,
     input: EntityUpsertInput,
 ) -> Result<EntityUpsertOutput> {
+    let kind = input.kind.parse::<EntityKind>().map_err(|e| {
+        crate::error::KbError::InvalidInput(e)
+    })?;
     let roles = input.roles.unwrap_or_default();
     let attrs = input.attrs.unwrap_or(serde_json::json!({}));
 
-    let id = entity::upsert(db, &input.name, &input.kind, roles, attrs, input.context).await?;
+    let id = entity::upsert(db, &input.name, kind, roles, attrs, input.context).await?;
 
     Ok(EntityUpsertOutput {
         id: id.to_string(),
@@ -65,15 +77,28 @@ pub struct EntityFindOutput {
     pub count: usize,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_entity_find"))]
+#[tracing::instrument(
+    name = "kb_entity_find",
+    skip_all,
+    fields(
+        kind = input.kind.as_deref().unwrap_or(""),
+        has_role_filter = input.role.is_some(),
+        query_len = input.query.len(),
+    )
+)]
 pub async fn execute_find(
     db: &SurrealClient,
     input: EntityFindInput,
 ) -> Result<EntityFindOutput> {
+    let kind = input
+        .kind
+        .as_deref()
+        .map(|s| s.parse::<EntityKind>().map_err(crate::error::KbError::InvalidInput))
+        .transpose()?;
     let entities = entity::find(
         db,
         &input.query,
-        input.kind.as_deref(),
+        kind,
         input.role.as_deref(),
     )
     .await?;
@@ -97,7 +122,11 @@ pub struct EntityGetOutput {
     pub entity: EntityFull,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_entity_get"))]
+#[tracing::instrument(
+    name = "kb_entity_get",
+    skip_all,
+    fields(id = %input.id)
+)]
 pub async fn execute_get(
     db: &SurrealClient,
     input: EntityGetInput,

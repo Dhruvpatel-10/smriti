@@ -12,7 +12,7 @@ pub struct AlertsOutput {
     pub count: usize,
 }
 
-#[tracing::instrument(skip_all, fields(tool = "kb_alerts"))]
+#[tracing::instrument(name = "kb_alerts", skip_all)]
 pub async fn execute(db: &SurrealClient, config: &AlertConfig) -> Result<AlertsOutput> {
     let alerts = alerts::check_all(db, config).await?;
     let count = alerts.len();
