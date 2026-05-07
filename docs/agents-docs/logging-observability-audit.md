@@ -6,13 +6,18 @@
 
 ---
 
-## Current Setup
+## Current Setup (updated 2026-05-01 — ADR-028 landed)
 
-**Subscriber:** `tracing_subscriber::fmt()` — plain-text, human-readable format (not JSON).
+**Subscriber:** `tracing_subscriber::registry()` with layered fmt layer. Format selected
+by `[observability].log_format`: `journald` (default under systemd via `JOURNAL_STREAM`),
+`json`, or `pretty`. ThrottleLayer stacked before fmt layer.
 **Default log level:** `INFO`. Controlled via `RUST_LOG` env var; falls back to `EnvFilter::new("info")` if unset.
-**Output:** All logging to `stderr` via `.with_writer(std::io::stderr)`. Correct — stdout is reserved for MCP protocol.
-**No log rotation or file sink.** For daemon mode, redirect stderr at the shell/systemd level.
-**`#[instrument]` coverage:** All public async functions in `src/db/` and all 17 tool execute paths carry `#[instrument]` (Wave F). Safe fields (type, subtype, project) captured; content/summary/query skipped.
+**Output:** All logging to `stderr`. Correct — stdout is reserved for MCP protocol.
+**No log rotation or file sink.** journald handles retention when running under systemd.
+**`#[instrument]` coverage:** All public async functions in `src/db/` and all tool execute paths carry `#[instrument]` (Wave F). Safe fields (type, subtype, project) captured; content/summary/query skipped.
+**Request correlation:** UUIDv7 `RequestId` task-local per tool call; propagated to sidecar RPC via `meta.request_id` in `JsonRpcRequest`. Background tasks use `operation_id = memory_id`.
+**ThrottleLayer:** Per-callsite drop within 500 ms window; sidecar/llm targets and crash-class events bypass throttle.
+**sd-notify:** `READY=1` emitted after listener bind; Watchdog ticker at `WatchdogUSec/2` interval.
 
 ---
 
@@ -70,6 +75,24 @@
 ### [CLOSED] Auto-link results
 **Partially closed 2026-04-20 — `tracing::debug!` added for auto-link complete event (Wave A). Aggregate per-session log absent but low priority.**
 
+### [CLOSED] No per-request correlation identifier
+**Closed 2026-05-01 (ADR-028 Step 2) — UUIDv7 `RequestId` task-local propagated to every tool call span and sidecar RPC `meta.request_id` envelope.**
+
+### [CLOSED] No structured log format for systemd/aggregators
+**Closed 2026-05-01 (ADR-028 Step 1) — `[observability].log_format` toggle; journald default under systemd, json available for aggregators.**
+
+### [CLOSED] High-frequency sidecar log flooding
+**Closed 2026-05-01 (ADR-028 Step 6) — ThrottleLayer drops repeated same-callsite events within 500 ms window; sidecar/llm targets exempt.**
+
+### [CLOSED] No liveness health signal to systemd
+**Closed 2026-05-01 (ADR-028 Step 7) — sd-notify `READY=1` on bind; Watchdog ticker at `WatchdogUSec/2`.**
+
+### [CLOSED] Recall latency invisible
+**Closed 2026-05-01 (ADR-028 Step 4) — hdrhistogram per-stage (BM25/Vector/Fusion/Rerank/SpreadingActivation); p50/p95/p99/max µs in `kb_status` diagnostics.**
+
+### [CLOSED] No diagnostics in kb_status
+**Closed 2026-05-01 (ADR-028 Step 5) — `kb_status(include_diagnostics=true)` returns DiagnosticsBlock with embedder, sidecar circuit state, DB counts, recall percentiles, uptime.**
+
 ### Still open (low priority, no action required currently)
 - **Supersession logged but not auditable:** When `supersede()` returns `Ok(true)`, there's no INFO log of "memory X superseded by memory Y" for audit purposes. WARN log exists for failures.
 - **Embedding model load duration** not logged.
@@ -78,7 +101,7 @@
 - **Queue operations:** `src/tools/queue.rs` has no logging. Queue writes and size-limit rejections invisible in log stream.
 - **`#[instrument]` span names** not explicitly set to match MCP tool names (e.g., `name = "kb_remember"`).
 - **`src/db/search.rs:557` — spreading activation failure** logged at WARN; arguably DEBUG since it's a best-effort enhancement.
-- **`src/llm/client.rs:92` — Gemini primary failure** logged at WARN even when Groq fallback succeeds; arguably DEBUG. LLM subsystem not yet active in primary path.
+- **Version negotiation with sidecar** descoped from ADR-028; no formal protocol version handshake between Rust server and TS sidecar.
 
 ---
 

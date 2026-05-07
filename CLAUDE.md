@@ -41,8 +41,10 @@ kb_archive(id, reason, correction_id?) -> {message}
             // reason=retract: "I was wrong" → invalidation_reason=retracted; correction_id creates retracts edge
 kb_promote(id) -> ()           // clear TTL, bump importance to ≥3
 
-kb_entity_upsert(name, kind, roles?, attrs?, context?) -> EntityId
+kb_entity_upsert(name, kind, roles?, attrs?, context?, aliases?) -> EntityId
+            // aliases: optional Vec<String> — each lowercased, deduplicated, len≥3; written to entity_alias table
 kb_entity_find(query, kind?, role?) -> [EntitySummary]  // use kind=person to find people
+            // falls back to alias FTS (idx_alias_value_ft) when canonical name FTS misses
 kb_entity_get(id) -> EntityFull
 
 kb_agent_register(name, kind, model?, version?, parent?, project?, config?) -> {id, message}
@@ -56,7 +58,10 @@ kb_relation_retract(from, to, kind, reason?) -> {message, retracted}   // soft-r
 kb_entity_delete(id, reason?) -> {message, deleted}                    // soft-archive entity; archived_at tombstone, hidden from find/get
 kb_consolidate(ids, result_summary) -> MemoryId
 kb_queue(instruction, source_project) -> ()
-kb_status(project?, domain?) -> StatusReport
+kb_status(project?, domain?, include_diagnostics?) -> StatusReport
+            // include_diagnostics=true adds DiagnosticsBlock: version, uptime_secs,
+            // embedder {provider,model,dimensions}, sidecar {circuit_state,restart_count,
+            // dropped_inflight,last_success_age_secs}, db counts, recall_stage_p95 µs
 kb_alerts() -> [Alert]
 kb_export(format?) -> ExportResult
 kb_import(path) -> ImportResult
@@ -89,6 +94,7 @@ BM25 → Vector → Fusion (RRF default | Convex Combination, configurable) → 
 - `MemoryType`/`MemorySubtype` enums — never raw strings
 - `MemoryId`/`EntityId` newtypes — no raw string IDs
 - `AgentId` newtype — no raw string agent IDs; `AgentKind`/`AgentStatus` enums
+- `RequestId(String)` newtype (`src/types/ids.rs`) — UUIDv7 per tool call; `tokio::task_local! REQUEST_ID`; access via `current_request_id()`; does NOT propagate across `tokio::spawn` (background tasks use `operation_id = memory_id`)
 - All SurrealQL uses parameterized bindings — no string interpolation
 - Visibility enforced in ALL query paths
 - Never log memory content (privacy) — only IDs + types
@@ -99,6 +105,7 @@ BM25 → Vector → Fusion (RRF default | Convex Combination, configurable) → 
 - Log to stderr (stdout reserved for MCP protocol)
 - Recall paths use `embed_query()`, write/store paths use `embed_document()` — Voyage backend exploits asymmetric `input_type`; local backend ignores
 - Embedder fingerprint (`provider/model/dim`) gated at startup against `_kb_metadata` (Migration 015) — mismatch with stored vectors → refuse to start, run `kb_reembed`
+- `entity_alias` is a plain SCHEMAFULL table (NOT a RELATE edge — `none` is a reserved keyword in SurrealDB v3); `value` field must be backtick-escaped as `` `value` `` in all SurrealQL; all reads filter `archived_at IS NONE`
 
 ---
 

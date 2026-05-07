@@ -69,6 +69,7 @@ async fn entity_upsert_and_get() {
         vec!["investor".into()],
         serde_json::json!({"fund": "Sequoia", "check_size": "$500k"}),
         Some("Met at demo day".into()),
+        &[],
     ).await.expect("upsert failed");
 
     let ent = entity::get(&db, &id).await.expect("get failed");
@@ -83,8 +84,8 @@ async fn entity_upsert_is_idempotent() {
     let (db, _dir) = test_db().await;
     use smriti::db::entity;
 
-    let id1 = entity::upsert(&db, "Alice", EntityKind::Person, vec![], serde_json::json!({}), None).await.unwrap();
-    let id2 = entity::upsert(&db, "Alice", EntityKind::Person, vec!["engineer".into()], serde_json::json!({"team": "backend"}), Some("Updated context".into())).await.unwrap();
+    let id1 = entity::upsert(&db, "Alice", EntityKind::Person, vec![], serde_json::json!({}), None, &[]).await.unwrap();
+    let id2 = entity::upsert(&db, "Alice", EntityKind::Person, vec!["engineer".into()], serde_json::json!({"team": "backend"}), Some("Updated context".into()), &[]).await.unwrap();
 
     // Should be the same entity (name is unique key)
     assert_eq!(id1, id2);
@@ -99,9 +100,9 @@ async fn entity_find_by_name() {
     let (db, _dir) = test_db().await;
     use smriti::db::entity;
 
-    entity::upsert(&db, "Alice Johnson", EntityKind::Person, vec!["engineer".into()], serde_json::json!({}), None).await.unwrap();
-    entity::upsert(&db, "Bob Smith", EntityKind::Person, vec!["designer".into()], serde_json::json!({}), None).await.unwrap();
-    entity::upsert(&db, "Acme Corp", EntityKind::Company, vec!["customer".into()], serde_json::json!({}), None).await.unwrap();
+    entity::upsert(&db, "Alice Johnson", EntityKind::Person, vec!["engineer".into()], serde_json::json!({}), None, &[]).await.unwrap();
+    entity::upsert(&db, "Bob Smith", EntityKind::Person, vec!["designer".into()], serde_json::json!({}), None, &[]).await.unwrap();
+    entity::upsert(&db, "Acme Corp", EntityKind::Company, vec!["customer".into()], serde_json::json!({}), None, &[]).await.unwrap();
 
     let results = entity::find(&db, "alice", None, None).await.unwrap();
     assert_eq!(results.len(), 1);

@@ -15,6 +15,7 @@ async fn create_entity(
         vec![],
         serde_json::json!({}),
         None,
+        &[],
     )
     .await
     .expect("entity upsert failed")

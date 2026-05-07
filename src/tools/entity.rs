@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{client::SurrealClient, entity};
-use crate::error::Result;
+use crate::error::{KbError, Result};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -21,6 +21,10 @@ pub struct EntityUpsertInput {
     pub attrs: Option<serde_json::Value>,
     /// One-line context summary
     pub context: Option<String>,
+    /// Optional aliases / nicknames for this entity. Each alias is stored
+    /// lowercase, must be ≥ 3 characters, and is rejected on collision with an
+    /// alias already registered to a different entity.
+    pub aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -43,13 +47,13 @@ pub async fn execute_upsert(
     db: &SurrealClient,
     input: EntityUpsertInput,
 ) -> Result<EntityUpsertOutput> {
-    let kind = input.kind.parse::<EntityKind>().map_err(|e| {
-        crate::error::KbError::InvalidInput(e)
-    })?;
+    let kind = input.kind.parse::<EntityKind>().map_err(KbError::InvalidInput)?;
     let roles = input.roles.unwrap_or_default();
     let attrs = input.attrs.unwrap_or(serde_json::json!({}));
+    let aliases = input.aliases.unwrap_or_default();
 
-    let id = entity::upsert(db, &input.name, kind, roles, attrs, input.context).await?;
+    let id =
+        entity::upsert(db, &input.name, kind, roles, attrs, input.context, &aliases).await?;
 
     Ok(EntityUpsertOutput {
         id: id.to_string(),

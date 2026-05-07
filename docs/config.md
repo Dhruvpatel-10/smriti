@@ -49,7 +49,7 @@ output_dimension = 1024                 # Matryoshka truncation: 256 | 512 | 102
 accepted_terms = false                  # must be true; Voyage no-training guarantee requires paid tier (ADR-016)
 
 [embeddings.voyage.reranker]
-enabled = false                         # opt-in stage 3.5 cross-encoder rerank (ADR-017)
+enabled = true                          # default-on stage 3.5 cross-encoder rerank (ADR-017, default flipped per ADR-022)
 model = "rerank-2.5-lite"               # Voyage rerank model
 top_k_input = 50                        # RRF pool size sent to reranker
 policy = "adaptive"                     # RerankerPolicy: "always" | "adaptive" (default) | "never" (ADR-022)
@@ -70,6 +70,15 @@ updates = 0.8                           # supersession chain
 relates = 0.5                           # weak topical link
 involves = 0.3                          # entity co-occurrence
 typed_relation = 0.9                    # LLM-extracted edge; scaled by edge confidence at query time
+
+[observability]
+log_format = "journald"                 # "journald" (default under systemd) | "json" | "pretty"
+                                        # auto-detected: journald when JOURNAL_STREAM env var set, else pretty
+
+[observability.throttle]
+window_ms = 500                         # drop repeated same-callsite events within this window (ms)
+allow_target_prefixes = ["sidecar", "smriti::llm"]  # these targets always pass through unthrottled
+                                        # events with field event_class containing "crash"/"panic" always pass
 
 [markdown]
 enabled = true                          # auto-regenerate ~/.claude/CLAUDE.md

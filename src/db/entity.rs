@@ -1,8 +1,9 @@
 use chrono::Utc;
 use surrealdb::types::RecordId;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::db::client::SurrealClient;
+use crate::db::entity_alias;
 use crate::db::memory::parse_memory_row;
 use crate::db::BITEMPORAL_ACTIVE;
 use crate::error::{KbError, Result};
@@ -18,7 +19,12 @@ use crate::types::*;
 /// and kind are replaced; attrs are merged via object::merge; context is
 /// replaced if provided). If no entity exists, a new one is created with a
 /// fresh `EntityId`.
-#[instrument(skip(db, name, attrs, context), fields(kind = %kind))]
+///
+/// `aliases` is a list of additional names (nicknames, abbreviations) to
+/// register for this entity. Each alias is lowercased before storage.
+/// Aliases identical to the canonical name (case-insensitive) are silently
+/// skipped. On collision, `KbError::AliasCollision` is returned.
+#[instrument(skip(db, name, attrs, context, aliases), fields(kind = %kind))]
 pub async fn upsert(
     db: &SurrealClient,
     name: &str,
@@ -26,17 +32,19 @@ pub async fn upsert(
     roles: Vec<String>,
     attrs: serde_json::Value,
     context: Option<String>,
+    aliases: &[String],
 ) -> Result<EntityId> {
     if name.trim().is_empty() {
         return Err(KbError::InvalidInput("entity name must not be empty".into()));
     }
 
     let now = Utc::now();
+    let name_lower = name.trim().to_lowercase();
 
-    // Try to find an existing entity by name first.
+    // Try to find an existing entity by name (canonical or alias) first.
     let existing = get_by_name(db, name).await;
 
-    match existing {
+    let entity_id = match existing {
         Ok(entity) => {
             // Entity exists — update it.
             db.query(
@@ -56,7 +64,7 @@ pub async fn upsert(
             .await
             .map_err(|e| KbError::db(format!("updating entity {}", entity.id), e))?;
 
-            Ok(entity.id)
+            entity.id
         }
         Err(KbError::NotFound(_)) => {
             // Entity does not exist — create it.
@@ -84,10 +92,21 @@ pub async fn upsert(
             .await
             .map_err(|e| KbError::db(format!("creating entity {id}"), e))?;
 
-            Ok(id)
+            id
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+
+    // Register aliases (skip any that match the canonical name).
+    for alias in aliases {
+        let alias_lower = alias.trim().to_lowercase();
+        if alias_lower == name_lower || alias_lower.len() < 3 {
+            continue;
+        }
+        entity_alias::upsert_alias(db, &entity_id, alias, None).await?;
     }
+
+    Ok(entity_id)
 }
 
 /// Get a single entity by its `EntityId`. Returns NotFound if archived.
@@ -125,6 +144,12 @@ pub async fn get(db: &SurrealClient, id: &EntityId) -> Result<Entity> {
 }
 
 /// Get a single entity by its unique name. Returns NotFound if archived.
+///
+/// Resolution order:
+/// 1. Exact canonical name match.
+/// 2. If no hit, exact alias match via `entity_alias::resolve`.
+/// When multiple canonical entities share an alias (should not occur under
+/// the UNIQUE index), logs WARN and returns the first by creation order.
 #[instrument(skip(db, name))]
 pub async fn get_by_name(db: &SurrealClient, name: &str) -> Result<Entity> {
     let mut result = db
@@ -137,14 +162,24 @@ pub async fn get_by_name(db: &SurrealClient, name: &str) -> Result<Entity> {
         .take(0)
         .map_err(|e| KbError::db(format!("deserializing entity '{name}'"), e))?;
 
-    let row = rows
-        .into_iter()
-        .next()
-        .ok_or_else(|| KbError::NotFound(name.to_string()))?;
+    if let Some(row) = rows.into_iter().next() {
+        let raw_id = extract_id_str(&row).unwrap_or_else(|| name.to_string());
+        return parse_entity_row(row, &raw_id);
+    }
 
-    // Extract the normalised id string from the row before calling parse.
-    let raw_id = extract_id_str(&row).unwrap_or_else(|| name.to_string());
-    parse_entity_row(row, &raw_id)
+    // Canonical name miss — try alias resolution.
+    let alias_ids = entity_alias::resolve(db, name).await.unwrap_or_default();
+    if alias_ids.is_empty() {
+        return Err(KbError::NotFound(name.to_string()));
+    }
+    if alias_ids.len() > 1 {
+        warn!(
+            name,
+            count = alias_ids.len(),
+            "alias resolved to multiple canonical entities; returning first"
+        );
+    }
+    get(db, &alias_ids[0]).await
 }
 
 /// Get an entity with its related memory count and the 5 most recent active
@@ -160,6 +195,9 @@ pub async fn get_full(db: &SurrealClient, id: &EntityId) -> Result<EntityFull> {
     // 3. Fetch up to 5 recent active memory summaries.
     let recent_memories = recent_memories(db, id, 5).await?;
 
+    // 4. Fetch active aliases.
+    let aliases = entity_alias::aliases_for(db, id).await.unwrap_or_default();
+
     Ok(EntityFull {
         id: entity.id,
         name: entity.name,
@@ -171,12 +209,16 @@ pub async fn get_full(db: &SurrealClient, id: &EntityId) -> Result<EntityFull> {
         recent_memories,
         created_at: entity.created_at,
         updated_at: entity.updated_at,
+        aliases,
     })
 }
 
-/// Search entities by name (case-insensitive substring), with optional
-/// `kind` and `role` filters. Returns `EntitySummary` rows ordered by
+/// Search entities by name (case-insensitive substring) or alias (FTS), with
+/// optional `kind` and `role` filters. Returns `EntitySummary` rows ordered by
 /// descending memory count.
+///
+/// Results from the canonical-name query and the alias FTS query are merged
+/// and deduplicated before the final limit is applied.
 #[instrument(skip(db, query))]
 pub async fn find(
     db: &SurrealClient,
@@ -226,10 +268,39 @@ pub async fn find(
         .take(0)
         .map_err(|e| KbError::db("deserializing entity search results", e))?;
 
-    let summaries = rows
+    let mut summaries: Vec<EntitySummary> = rows
         .into_iter()
         .filter_map(|v| parse_entity_summary_row(v).ok())
         .collect();
+
+    // Also search aliases via FTS; merge canonical entities not already in results.
+    let alias_entity_ids = entity_alias::resolve_fts(db, query, 10).await.unwrap_or_default();
+    let existing_ids: std::collections::HashSet<String> =
+        summaries.iter().map(|s| s.id.as_str().to_string()).collect();
+
+    for eid in alias_entity_ids {
+        if existing_ids.contains(eid.as_str()) {
+            continue;
+        }
+        // Fetch summary for each alias-matched entity (skipping archived).
+        if let Ok(entity) = get(db, &eid).await {
+            let memory_count = count_memories(db, &eid).await.unwrap_or(0);
+            let aliases = entity_alias::aliases_for(db, &eid).await.unwrap_or_default();
+            summaries.push(EntitySummary {
+                id: entity.id,
+                name: entity.name,
+                kind: entity.kind,
+                roles: entity.roles,
+                context: entity.context,
+                memory_count,
+                aliases,
+            });
+        }
+    }
+
+    // Sort combined list by memory count descending and apply limit.
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.memory_count));
+    summaries.truncate(20);
 
     Ok(summaries)
 }
@@ -238,6 +309,8 @@ pub async fn find(
 ///
 /// Idempotent: returns Ok(false) if already archived or not found.
 /// Returns Ok(true) if the entity was archived by this call.
+///
+/// Cascade-archives all active aliases for the entity (ADR-030, Step 10).
 #[instrument(skip(db))]
 pub async fn archive(db: &SurrealClient, id: &EntityId, reason: Option<&str>) -> Result<bool> {
     let mut response = db
@@ -253,7 +326,16 @@ pub async fn archive(db: &SurrealClient, id: &EntityId, reason: Option<&str>) ->
         .map_err(|e| KbError::db(format!("archiving entity {id}"), e))?;
 
     let updated: Vec<serde_json::Value> = response.take(0usize).unwrap_or_default();
-    Ok(!updated.is_empty())
+    let archived = !updated.is_empty();
+
+    if archived {
+        // Cascade-archive all aliases so they no longer resolve to this entity.
+        if let Err(e) = entity_alias::archive_all_for_entity(db, id).await {
+            warn!(id = %id, "failed to cascade-archive aliases: {e}");
+        }
+    }
+
+    Ok(archived)
 }
 
 // ---------------------------------------------------------------------------

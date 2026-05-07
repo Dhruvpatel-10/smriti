@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
 use surrealdb::types::RecordId;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::config::{FusionConfig, FusionStrategy, SpreadingConfig};
 use crate::db::client::SurrealClient;
+use crate::db::entity_alias;
 use crate::db::helpers::enum_to_value;
 use crate::db::memory::parse_memory_row;
+use crate::db::recall_metrics::{self, RecallStage};
 use crate::db::reranker::{RerankCandidate, Reranker};
 use crate::db::BITEMPORAL_ACTIVE;
 use crate::error::{KbError, Result};
@@ -248,11 +251,6 @@ fn compute_sm2(row: &serde_json::Value) -> Option<Sm2Update> {
 
 // ── Spreading Activation ────────────────────────────────────────────────────
 
-/// Minimum confidence for LLM-extracted typed_relation edges to participate in
-/// spreading activation. Low-confidence extractions are noisy and should not
-/// inflate the neighbor set.
-const TYPED_RELATION_CONFIDENCE_FLOOR: f32 = 0.5;
-
 /// Fetch one-hop graph neighbors of the given memory IDs via extends, derives,
 /// relates, AND involves edges. Applies ADR-023 per-edge-type weights and
 /// hop decay so high-weight edges (derives, extends) surface before weak
@@ -284,6 +282,7 @@ async fn spreading_activation(
 
     // Collect neighbor IDs from graph edges (both directions) with per-field weights.
     // Each field group maps to the ADR-023 edge weight for that edge type.
+    // The involves traversal is handled separately (see hub-cap logic below).
     let mut result = db
         .query(
             "SELECT
@@ -294,17 +293,161 @@ async fn spreading_activation(
                 array::flatten(->relates->memory.id) AS rel_out,
                 array::flatten(<-relates<-memory.id) AS rel_in,
                 array::flatten(->updates->memory.id) AS upd_out,
-                array::flatten(<-updates<-memory.id) AS upd_in,
-                array::flatten(->involves->entity<-involves<-memory.id) AS inv_via_entity
+                array::flatten(<-updates<-memory.id) AS upd_in
              FROM memory WHERE record::id(id) IN $ids",
         )
         .bind(("ids", known_ids.to_vec()))
         .await
         .map_err(|e| KbError::db("spreading activation neighbor query", e))?;
 
-    let rows: Vec<serde_json::Value> = result
+    let mut rows: Vec<serde_json::Value> = result
         .take(0)
         .map_err(|e| KbError::db("deserializing spreading activation neighbors", e))?;
+
+    // Hub-degree cap for involves edges (ADR-029, Change 1).
+    // Two-query approach: get entity IDs reachable via involves, check each
+    // entity's degree, skip entities with degree > involves_hub_cap.
+    // Entities reached via derives/extends/updates/relates are NOT affected.
+    let hub_cap = w.involves_hub_cap;
+    let inv_neighbor_ids: Vec<String> = {
+        let mut inv_result = db
+            .query(
+                "SELECT array::flatten(->involves->entity.id) AS ent_ids
+                 FROM memory WHERE record::id(id) IN $ids",
+            )
+            .bind(("ids", known_ids.to_vec()))
+            .await
+            .map_err(|e| KbError::db("spreading activation involves entity query", e))?;
+        let inv_ent_rows: Vec<serde_json::Value> = inv_result
+            .take(0)
+            .map_err(|e| KbError::db("deserializing involves entity ids", e))?;
+
+        // Collect flat list of entity record IDs reachable via involves.
+        let ent_ids: Vec<surrealdb::types::RecordId> = inv_ent_rows
+            .iter()
+            .flat_map(|row| {
+                row.get("ent_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| match v {
+                                serde_json::Value::String(s) => {
+                                    let id_part = s.strip_prefix("entity:").unwrap_or(s);
+                                    Some(surrealdb::types::RecordId::new("entity", id_part))
+                                }
+                                serde_json::Value::Object(obj) => {
+                                    // Nested {tb, id} representation from SurrealDB.
+                                    let id_part = obj
+                                        .get("id")
+                                        .and_then(|inner| match inner {
+                                            serde_json::Value::String(s) => Some(s.as_str()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or("");
+                                    if id_part.is_empty() {
+                                        None
+                                    } else {
+                                        Some(surrealdb::types::RecordId::new("entity", id_part))
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        if ent_ids.is_empty() {
+            vec![]
+        } else {
+            // Degree check: count how many memories each entity is involved with.
+            let mut deg_result = db
+                .query(
+                    "SELECT record::id(id) AS eid, count(<-involves) AS deg
+                     FROM entity WHERE id INSIDE $eids",
+                )
+                .bind(("eids", ent_ids))
+                .await
+                .map_err(|e| KbError::db("spreading activation entity degree query", e))?;
+            let deg_rows: Vec<serde_json::Value> = deg_result
+                .take(0)
+                .map_err(|e| KbError::db("deserializing entity degrees", e))?;
+
+            // Collect non-hub entity IDs (degree <= hub_cap).
+            let non_hub_eids: Vec<surrealdb::types::RecordId> = deg_rows
+                .iter()
+                .filter_map(|row| {
+                    let deg = row.get("deg").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if deg <= hub_cap as u64 {
+                        row.get("eid").and_then(|v| v.as_str()).map(|s| {
+                            surrealdb::types::RecordId::new("entity", s)
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if non_hub_eids.is_empty() {
+                vec![]
+            } else {
+                // Get memory IDs reachable from non-hub entities.
+                let mut mem_result = db
+                    .query(
+                        "SELECT array::flatten(<-involves<-memory.id) AS mem_ids
+                         FROM entity WHERE id INSIDE $eids",
+                    )
+                    .bind(("eids", non_hub_eids))
+                    .await
+                    .map_err(|e| KbError::db("spreading activation involves memory query", e))?;
+                let mem_rows: Vec<serde_json::Value> = mem_result
+                    .take(0)
+                    .map_err(|e| KbError::db("deserializing involves memory ids", e))?;
+
+                mem_rows
+                    .iter()
+                    .flat_map(|row| {
+                        row.get("mem_ids")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| {
+                                        let s = match v {
+                                            serde_json::Value::String(s) => s
+                                                .strip_prefix("memory:")
+                                                .unwrap_or(s)
+                                                .to_string(),
+                                            serde_json::Value::Object(obj) => obj
+                                                .get("id")
+                                                .and_then(|inner| match inner {
+                                                    serde_json::Value::String(s) => Some(s.clone()),
+                                                    serde_json::Value::Object(o) => o
+                                                        .get("String")
+                                                        .and_then(|s| s.as_str().map(String::from)),
+                                                    _ => None,
+                                                })
+                                                .unwrap_or_default(),
+                                            _ => return None,
+                                        };
+                                        if s.is_empty() { None } else { Some(s) }
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            }
+        }
+    };
+
+    // Inject inv_via_entity into each row as a synthetic field so the existing
+    // scoring loop (field_weights) can process it uniformly. We attach the full
+    // list once to the first row (or a synthetic row) since hub-filtered IDs are
+    // not per-source-memory but an aggregate across all primary memories.
+    // To keep the scoring loop unchanged, we add a synthetic row for involves.
+    let synthetic_inv_row = serde_json::json!({"inv_via_entity": inv_neighbor_ids});
+    rows.push(synthetic_inv_row);
 
     // Collect typed_relation neighbors with confidence so we can compute
     // the variable weight (confidence × typed_relation_max).
@@ -327,7 +470,7 @@ async fn spreading_activation(
                AND confidence >= $conf_floor;",
         )
         .bind(("rec_ids", rec_ids))
-        .bind(("conf_floor", TYPED_RELATION_CONFIDENCE_FLOOR))
+        .bind(("conf_floor", w.typed_relation_confidence_floor))
         .await
     {
         Ok(mut r) => {
@@ -426,7 +569,7 @@ async fn spreading_activation(
     let extract_confidence = |row: &serde_json::Value| -> f64 {
         row.get("tr_conf")
             .and_then(|v| v.as_f64())
-            .unwrap_or(TYPED_RELATION_CONFIDENCE_FLOOR as f64)
+            .unwrap_or(w.typed_relation_confidence_floor)
     };
 
     for row in &tr_out_rows {
@@ -454,7 +597,13 @@ async fn spreading_activation(
         }
     }
 
+    let candidates_seen = neighbor_scores.len() as u64;
     if neighbor_scores.is_empty() {
+        recall_metrics::record_sa(recall_metrics::SpreadingActivationStats {
+            candidates_seen: 0,
+            neighbors_added: 0,
+            cap_saturated: false,
+        });
         return Ok(vec![]);
     }
 
@@ -462,6 +611,10 @@ async fn spreading_activation(
     let mut scored: Vec<(String, f64)> = neighbor_scores.into_iter().collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(cfg.cap);
+    let neighbors_added = scored.len() as u64;
+    let cap_saturated = candidates_seen > neighbors_added && neighbors_added >= cfg.cap as u64;
+    tracing::debug!(candidates_seen, neighbors_added, cap_saturated, "spreading activation summary");
+    recall_metrics::record_sa(recall_metrics::SpreadingActivationStats { candidates_seen, neighbors_added, cap_saturated });
     let neighbor_ids: Vec<String> = scored.into_iter().map(|(id, _)| id).collect();
 
     // Fetch neighbor memory records applying the same visibility contract as the
@@ -625,6 +778,7 @@ pub async fn recall(
     fusion_cfg: &FusionConfig,
     policy: RerankerPolicy,
     caller_override: Option<bool>,
+    spreading_override: Option<bool>,
 ) -> Result<Vec<MemorySummary>> {
     let fetch_limit = limit.min(50) as i64;
 
@@ -638,6 +792,7 @@ pub async fn recall(
 
     // ── Step 1: BM25 full-text search ───────────────────────────────────
 
+    let _bm25_started = Instant::now();
     let mut conditions = vec![BITEMPORAL_ACTIVE.to_string()];
 
     // Visibility filtering: prevent private/sensitive memories from leaking.
@@ -731,9 +886,12 @@ pub async fn recall(
     // Build content map from BM25 rows (SELECT * includes content). Extended
     // below with vector rows so all candidates can be paired for reranking.
     let mut content_map = build_content_map(&bm25_rows);
+    recall_metrics::record(RecallStage::Bm25, _bm25_started.elapsed());
 
     // ── Step 2: Vector similarity search (optional) ─────────────────────
 
+    let _vector_started = Instant::now();
+    let _vector_qv_present = query_vector.is_some();
     let (vector_memories, vec_raw_scores) = if let Some(qv) = query_vector {
         // Brute-force cosine similarity scan. SurrealKV embedded doesn't support
         // MTREE ANN indexes yet, but brute-force is fast enough for a personal KB
@@ -809,10 +967,14 @@ pub async fn recall(
     } else {
         (vec![], vec![])
     };
+    if _vector_qv_present {
+        recall_metrics::record(RecallStage::Vector, _vector_started.elapsed());
+    }
 
     // ── Step 3: Fusion (RRF or Convex Combination) ────────────────────
     // Strategy is selected per search.fusion.strategy in config.
 
+    let _fusion_started = Instant::now();
     let limit_usize = limit.min(50) as usize;
     // Cycle 4: reserve 3 slots for spreading activation when limit is generous enough.
     // At small limits, don't sacrifice primary recall for graph hops.
@@ -848,6 +1010,7 @@ pub async fn recall(
             ),
         }
     };
+    recall_metrics::record(RecallStage::Fusion, _fusion_started.elapsed());
 
     // ── Step 3.5: Cross-encoder rerank (ADR-017, ADR-022) ────────────
     if let Some(r) = reranker
@@ -867,8 +1030,10 @@ pub async fn recall(
             decision = true,
             "rerank gate"
         );
+        let _rerank_started = Instant::now();
         let candidates = to_rerank_candidates(memories, &content_map);
         memories = r.rerank(query, candidates).await;
+        recall_metrics::record(RecallStage::Rerank, _rerank_started.elapsed());
     } else if reranker.is_some() {
         tracing::info!(
             target: "rerank.decision",
@@ -888,15 +1053,47 @@ pub async fn recall(
     if let Some(person_name) = person {
         // Exact lowercased match prevents "Alex" from matching "Alexander".
         // Names are stored as supplied at write time; we normalize both sides.
-        // Both statements share the same $name binding and execute in one round-trip.
+        //
+        // Fix (ADR-029): also fetch degree so hub entities (degree > involves_hub_cap)
+        // can be skipped — same cap pattern as spreading_activation.
+        // Fix: entity query gates on archived_at IS NONE to exclude soft-deleted entities.
+        // Note: person table has no archived_at field (legacy table, no new writes since
+        // graph.rs migration); hub cap applies to person rows via degree count as well.
+        //
+        // ADR-030: also resolve aliases. Canonical entity IDs from alias lookup are
+        // added to the entity query via a second SQL statement.
+        //
+        // All statements share the same $name binding and execute in one round-trip.
+        let hub_cap = spreading_cfg.edge_weights.involves_hub_cap as u64;
+
+        // Resolve alias first (cheap — exact index lookup).
+        let alias_entity_ids = entity_alias::resolve(db, person_name).await.unwrap_or_default();
+        if alias_entity_ids.len() > 1 {
+            warn!(
+                person = person_name,
+                count = alias_entity_ids.len(),
+                "person filter: alias resolved to multiple canonical entities, including all"
+            );
+        }
+
+        // Build a list of SurrealDB RecordIds for the alias-resolved entities so we
+        // can query their involves-edges in the same round-trip.
+        let alias_rids: Vec<surrealdb::types::RecordId> = alias_entity_ids
+            .iter()
+            .map(|eid| surrealdb::types::RecordId::new("entity", eid.as_str()))
+            .collect();
+
         let mut combined_result = db
             .query(
-                "SELECT array::flatten(<-involves<-memory.id) AS mem_ids FROM entity
+                "SELECT array::flatten(<-involves<-memory.id) AS mem_ids, count(<-involves) AS degree FROM entity
+                 WHERE string::lowercase(name) = string::lowercase($name) AND archived_at IS NONE;
+                 SELECT array::flatten(<-involves<-memory.id) AS mem_ids, count(<-involves) AS degree FROM person
                  WHERE string::lowercase(name) = string::lowercase($name);
-                 SELECT array::flatten(<-involves<-memory.id) AS mem_ids FROM person
-                 WHERE string::lowercase(name) = string::lowercase($name)",
+                 SELECT array::flatten(<-involves<-memory.id) AS mem_ids, count(<-involves) AS degree FROM entity
+                 WHERE id INSIDE $alias_eids AND archived_at IS NONE",
             )
             .bind(("name", person_name.to_string()))
+            .bind(("alias_eids", alias_rids))
             .await
             .map_err(|e| KbError::db("entity-anchored query", e))?;
 
@@ -916,21 +1113,43 @@ pub async fn recall(
                 .unwrap_or_default()
         };
 
+        // Apply hub cap: skip entity/person nodes whose involves-degree exceeds the cap.
+        // Prevents corpus-wide hub entities from flooding the person filter with
+        // uncorrelated memories (ADR-029, Change 1).
+        let under_hub_cap = |row: &serde_json::Value| -> bool {
+            let deg = row.get("degree").and_then(|v| v.as_u64()).unwrap_or(0);
+            deg <= hub_cap
+        };
+
         let entity_rows: Vec<serde_json::Value> = combined_result
             .take(0)
             .map_err(|e| KbError::db("deserializing entity filter", e))?;
         let person_rows: Vec<serde_json::Value> = combined_result
             .take(1)
             .map_err(|e| KbError::db("deserializing person filter", e))?;
+        let alias_entity_rows: Vec<serde_json::Value> = combined_result
+            .take(2)
+            .map_err(|e| KbError::db("deserializing alias entity filter", e))?;
 
         for row in &entity_rows {
-            for id in extract_ids_from_row(row) {
-                entity_mem_ids.insert(id);
+            if under_hub_cap(row) {
+                for id in extract_ids_from_row(row) {
+                    entity_mem_ids.insert(id);
+                }
             }
         }
         for row in &person_rows {
-            for id in extract_ids_from_row(row) {
-                entity_mem_ids.insert(id);
+            if under_hub_cap(row) {
+                for id in extract_ids_from_row(row) {
+                    entity_mem_ids.insert(id);
+                }
+            }
+        }
+        for row in &alias_entity_rows {
+            if under_hub_cap(row) {
+                for id in extract_ids_from_row(row) {
+                    entity_mem_ids.insert(id);
+                }
             }
         }
 
@@ -1033,6 +1252,95 @@ pub async fn recall(
         }
     }
 
+    // ── Step 4.5: Alias FTS pre-expansion (ADR-030) ─────────────────────
+    //
+    // When no explicit person= filter is present, run a single alias FTS lookup
+    // on the query string.  Any matched canonical entity IDs are used to fetch
+    // entity-linked memories and merge them into the primary results, giving
+    // alias-anchored memories a chance to surface before spreading activation.
+    //
+    // Bounded at 5 entities / 5 extra memories — cheap, single FTS.
+    // Only runs when there is still budget in the result list.
+    if person.is_none() && !query.trim().is_empty() && memories.len() < primary_cap {
+        let alias_anchor_ids = entity_alias::resolve_fts_warn_multi(db, query, 5).await;
+        if !alias_anchor_ids.is_empty() {
+            let alias_rids: Vec<surrealdb::types::RecordId> = alias_anchor_ids
+                .iter()
+                .map(|eid| surrealdb::types::RecordId::new("entity", eid.as_str()))
+                .collect();
+            let existing_ids: HashSet<String> =
+                memories.iter().map(|m| m.id.as_str().to_string()).collect();
+
+            let visibility_clause = if project.is_some() {
+                "AND visibility != 'sensitive'"
+            } else {
+                "AND visibility = 'standard'"
+            };
+            let proj_clause = if project.is_some() { "AND project = $aa_project" } else { "" };
+            let author_clause_aa = match author_filter {
+                AuthorFilter::None => "",
+                AuthorFilter::UserOnly => "AND author IS NONE",
+                AuthorFilter::Agent(_) => "AND author = $aa_author_id",
+            };
+            let budget = (primary_cap - memories.len()).min(5) as i64;
+            // Two-statement approach: first get memory IDs via involves edges, then fetch memories.
+            match db
+                .query(
+                    "SELECT record::id(in) AS mid FROM involves WHERE out INSIDE $eids LIMIT 50",
+                )
+                .bind(("eids", alias_rids))
+                .await
+            {
+                Ok(mut res) => {
+                    let inv_rows: Vec<serde_json::Value> = res.take(0).unwrap_or_default();
+                    let alias_mem_ids: Vec<String> = inv_rows
+                        .iter()
+                        .filter_map(|v| {
+                            v.get("mid").and_then(|s| s.as_str()).map(String::from)
+                        })
+                        .filter(|id| !existing_ids.contains(id))
+                        .collect();
+
+                    if !alias_mem_ids.is_empty() {
+                        let aa_sql2 = format!(
+                            "SELECT * FROM memory
+                             WHERE {BITEMPORAL_ACTIVE} {visibility_clause} {proj_clause} {author_clause_aa}
+                               AND record::id(id) IN $alias_mem_ids
+                             ORDER BY importance DESC, event_at DESC LIMIT $aa_lim"
+                        );
+                        let mut q2 = db.query(&aa_sql2);
+                        q2 = q2.bind(("alias_mem_ids", alias_mem_ids));
+                        q2 = q2.bind(("aa_lim", budget));
+                        if let Some(p) = project {
+                            q2 = q2.bind(("aa_project", p.to_string()));
+                        }
+                        if let AuthorFilter::Agent(aid) = author_filter {
+                            let rid = RecordId::new("agent", aid.as_str());
+                            q2 = q2.bind(("aa_author_id", rid));
+                        }
+                        match q2.await {
+                            Ok(mut res2) => {
+                                let rows2: Vec<serde_json::Value> =
+                                    res2.take(0).unwrap_or_default();
+                                for mem in parse_rows(&rows2) {
+                                    if !existing_ids.contains(mem.id.as_str()) {
+                                        memories.push(mem);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("alias anchor memory fetch failed: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("alias anchor involves query failed: {e}");
+                }
+            }
+        }
+    }
+
     // ── Step 5: Spreading activation (one-hop graph expansion) ──────────
 
     // Use a HashSet for O(1) membership checks instead of linear Vec scan.
@@ -1040,7 +1348,9 @@ pub async fn recall(
     let primary_id_set: HashSet<&str> = primary_ids.iter().map(|s| s.as_str()).collect();
     // Cap neighbors at configured cap (default 3); never exceed remaining budget.
     let neighbor_budget = spreading_cfg.cap.min(limit_usize.saturating_sub(memories.len()));
-    if neighbor_budget > 0 {
+    let spreading_enabled = spreading_override.unwrap_or(true);
+    if neighbor_budget > 0 && spreading_enabled {
+        let _spread_started = Instant::now();
         // Pass a cap-limited view of the config so the fn respects the remaining budget.
         let effective_cfg = SpreadingConfig {
             cap: neighbor_budget,
@@ -1058,6 +1368,7 @@ pub async fn recall(
                 tracing::debug!("spreading activation failed: {e}");
             }
         }
+        recall_metrics::record(RecallStage::SpreadingActivation, _spread_started.elapsed());
     }
 
     // ── Step 6: SM-2 schedule update (fire-and-forget) ───────────────────
@@ -1450,6 +1761,7 @@ pub async fn status_query(
         active_memories: active_row
             .and_then(|v| v.get("total").and_then(|t| t.as_u64()))
             .unwrap_or(0),
+        diagnostics: None,
     })
 }
 

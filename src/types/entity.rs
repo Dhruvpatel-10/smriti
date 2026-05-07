@@ -17,6 +17,8 @@ pub struct Entity {
     pub context: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// Summary returned by entity search.
@@ -28,6 +30,8 @@ pub struct EntitySummary {
     pub roles: Vec<String>,
     pub context: Option<String>,
     pub memory_count: u64,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// Full entity returned by kb_entity_get, includes related memories.
@@ -43,5 +47,7 @@ pub struct EntityFull {
     pub recent_memories: Vec<MemorySummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 

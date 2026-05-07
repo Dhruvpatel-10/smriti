@@ -30,6 +30,10 @@ pub struct RecallAtInput {
     /// When true (default), exclude memories explicitly retracted as wrong by the user.
     /// Set to false only for forensic/audit work where seeing disowned facts is intentional.
     pub exclude_retracted: Option<bool>,
+    /// Reserved for forward-compat with ADR-029. kb_recall_at has no SA stage today;
+    /// this field is accepted and ignored so callers can use a uniform parameter set.
+    #[serde(default)]
+    pub spreading: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

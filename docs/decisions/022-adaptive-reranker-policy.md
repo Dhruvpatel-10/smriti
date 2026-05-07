@@ -1,7 +1,7 @@
 # ADR-022: Adaptive Reranker Policy
 
-**Status:** Proposed — 2026-04-30
-**Date:** 2026-04-30
+**Status:** Accepted
+**Date:** 2026-05-07
 **Extends:** ADR-017 (Voyage reranker), ADR-021 (graded-relevance oracle)
 
 ## Context
@@ -158,3 +158,15 @@ follow-up ADR amendment or in `bench/RESULTS.md`.
 - ADR-017: Voyage reranker (this ADR extends it with per-query policy control).
 - ADR-021: Graded-relevance oracle (provides nDCG@10 signal to calibrate the
   thresholds defined here).
+
+## 2026-05-07 update
+
+`VoyageRerankerConfig::enabled` default flipped from `false` to `true` in both
+`serde` deserialization (missing field) and `Default::default()`. Motivation:
+analysis of the LoCoMo probe set shows 27.6% of queries have the correct answer
+parked at rank 2-4 in the RRF pool. The adaptive policy cannot help when the
+reranker object is `None` at server boot — gating on `enabled=false` means the
+policy machinery is never exercised. Flipping the default to `true` allows
+`rerank-2.5-lite` to earn its keep under real traffic before larger pipeline
+refactors. Estimated cost impact: ~$0.05/1k queries with `policy=adaptive`.
+Operators who explicitly set `enabled = false` in `config.toml` are unaffected.

@@ -101,6 +101,17 @@ predicate (`WHERE invalidated_at IS NONE`) to prevent already-archived memories 
 sent to the LLM. The `cluster_hash` UNIQUE index prevents duplicate attempt rows. No action
 required — compliant with audit rubric on all points.
 
+### [info] src/db/entity.rs — `entity_alias` table (Migration 021, ADR-030)
+New `entity_alias` SCHEMAFULL table introduced by ADR-030. All queries use parameterized bindings — no string interpolation. Key SurrealDB v3 notes:
+
+- `value` is a reserved keyword (single-field projection shorthand); must be backtick-escaped as `` `value` `` in every SurrealQL statement that references the field (SELECT, DEFINE FIELD, DEFINE INDEX, ASSERT).
+- All reads filter `archived_at IS NONE` (soft-delete invariant; same tombstone pattern as `memory` and `entity`).
+- `idx_alias_value_unique` (UNIQUE) enforces the global-namespace invariant at the DB layer — alias strings cannot point to two entities.
+- `idx_alias_value_ft` is a FULLTEXT index using `alias_analyzer` (`TOKENIZERS blank FILTERS lowercase`). BM25 score extracted via `search::score(0)` (positional index 0 on this table). `blank` tokenizer chosen deliberately — class-based tokenizers break short names into sub-tokens that produce false positives.
+- `idx_alias_entity_id` (non-unique) supports SELECT-by-entity queries in upsert and `kb_entity_get`.
+- Bitemporal validity (`valid_from` / `valid_until`) applied in `resolve_at()` for `kb_recall_at` point-in-time queries.
+- No action required — compliant with audit rubric on all points.
+
 ### [info] src/db/consolidation.rs — `find_candidates` signature and SQL changes (ADR-026)
 `find_candidates` now accepts `min_age_days: Option<u32>` and `max_cluster_size: Option<u32>`
 parameters, both bound as `$min_age_days` / `$max_cluster_size` via `.bind()`. The GROUP BY

@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::db::client::SurrealClient;
 use crate::db::dedup;
+use crate::db::entity_alias;
 use crate::db::graph;
+use crate::db::memory as db_memory;
 use crate::error::{KbError, Result};
 use crate::shutdown::TaskRegistry;
 use crate::types::{MemoryId, RelationType};
@@ -100,11 +102,17 @@ pub async fn match_known_entities(
     }
 
     let mut links_created = 0u32;
+    // Canonical entity names found via FTS. Used to update anchor_entities so
+    // the stored anchors reflect canonical DB names rather than raw extraction
+    // tokens (e.g. "Robert Smith" not "Bob"). Dedup preserves first-seen order.
+    let mut canonical_names: Vec<String> = Vec::new();
+    let mut alias_hits = 0u32;
 
     for candidate in candidates {
+        // Primary: FTS on canonical entity name.
         let mut result = db
-            .query("SELECT id, name FROM entity WHERE name @@ $candidate LIMIT 1")
-            .bind(("candidate", candidate))
+            .query("SELECT id, name FROM entity WHERE name @@ $candidate AND archived_at IS NONE LIMIT 1")
+            .bind(("candidate", candidate.clone()))
             .await
             .map_err(|e| KbError::db("entity FTS lookup", e))?;
 
@@ -112,14 +120,63 @@ pub async fn match_known_entities(
             .take(0)
             .unwrap_or_default();
 
-        for row in rows {
+        let mut matched_canonical: Option<String> = None;
+
+        for row in &rows {
             if let Some(name) = row.get("name").and_then(|v| v.as_str()) {
-                match graph::link_entity(db, memory_id, name).await {
-                    Ok(()) => links_created += 1,
-                    Err(e) => warn!(id = %memory_id, "entity auto-link failed: {e}"),
+                matched_canonical = Some(name.to_string());
+            }
+        }
+
+        // Secondary: if canonical FTS missed, try alias FTS (ADR-030).
+        // The alias `blank` tokenizer splits on whitespace, so "Bob" will match
+        // an alias "bob" registered on "Robert Smith".
+        if matched_canonical.is_none() {
+            let alias_ids = entity_alias::resolve_fts(db, &candidate, 1).await.unwrap_or_default();
+            if let Some(eid) = alias_ids.into_iter().next() {
+                // Fetch the canonical name for the alias-resolved entity.
+                let mut r = db
+                    .query("SELECT name FROM type::record('entity', $eid) LIMIT 1")
+                    .bind(("eid", eid.as_str().to_string()))
+                    .await
+                    .map_err(|e| KbError::db("fetching canonical name for alias match", e))?;
+                let crows: Vec<serde_json::Value> = r.take(0).unwrap_or_default();
+                if let Some(name) = crows
+                    .into_iter()
+                    .next()
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+                {
+                    alias_hits += 1;
+                    matched_canonical = Some(name);
                 }
             }
         }
+
+        if let Some(name) = matched_canonical {
+            // Use canonical name from entity table for involves edge.
+            match graph::link_entity(db, memory_id, &name).await {
+                Ok(()) => {
+                    links_created += 1;
+                    // Collect canonical name for anchor_entities update.
+                    if !canonical_names.contains(&name) {
+                        canonical_names.push(name);
+                    }
+                }
+                Err(e) => warn!(id = %memory_id, "entity auto-link failed: {e}"),
+            }
+        }
+    }
+
+    if alias_hits > 0 {
+        info!(id = %memory_id, alias_hits, "auto-link: alias resolution path fired");
+    }
+
+    // Merge canonical names into anchor_entities using array union so we don't
+    // clobber anchors already written by the sidecar extract_anchors pipeline.
+    if !canonical_names.is_empty()
+        && let Err(e) = db_memory::merge_anchors(db, memory_id, &canonical_names).await
+    {
+        warn!(id = %memory_id, "anchor canonicalization write failed: {e}");
     }
 
     Ok(links_created)

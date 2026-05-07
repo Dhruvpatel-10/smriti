@@ -117,6 +117,16 @@ the prompt-injection defense.
 
 ---
 
+## Entity Alias Privacy Notes (ADR-030)
+
+### [INFO] visibility — `entity_alias` has no separate visibility field; inherits entity visibility
+Alias rows link to a canonical entity via `entity_id`. There is no `visibility` field on `entity_alias`. All alias-resolution code paths (`get_by_name`, `kb_entity_find`, person-filter in `search.rs`, `auto_link::match_known_entities`) return the canonical entity record after alias lookup; entity-level visibility is enforced at the entity read site as normal. An alias cannot be used to bypass entity visibility.
+
+### [INFO] data-integrity — archived entity → aliases effectively cascade-hidden
+When `kb_entity_delete` sets `entity.archived_at`, the entity is hidden from `kb_entity_find` and `kb_entity_get`. Alias rows for that entity remain in `entity_alias` with their own `archived_at = NULL`, but they can only be reached via a join to the entity record. Because all alias-resolution paths return the canonical entity and the entity is hidden, the aliases are also unreachable from normal tool paths. No hard-delete of alias rows is required by the existing soft-delete invariant.
+
+---
+
 ## Info Findings (no action required)
 
 ### [INFO] injection — All SurrealQL queries use parameterized bindings

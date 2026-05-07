@@ -51,6 +51,7 @@ smriti/
 |   |   +-- consolidation_ledger.rs <- auto-consolidation attempt ledger (migration 018, ADR-026)
 |   |   +-- chunking.rs          <- content chunking for long documents + vector search
 |   |   +-- reembed.rs           <- re-embedding migration (model/dim changes)
+|   |   +-- recall_metrics.rs    <- hdrhistogram per-stage latency (BM25/Vector/Fusion/Rerank/SpreadingActivation); p50/p95/p99/max µs; snapshot_and_reset for kb_status (ADR-028)
 |   +-- tools/
 |   |   +-- mod.rs
 |   |   +-- remember.rs          <- kb_remember: validate→embed→dedup→create→post-create
@@ -72,8 +73,11 @@ smriti/
 |   |   +-- agent.rs             <- kb_agent_register/retire/query handlers
 |   +-- llm/
 |   |   +-- mod.rs               <- LLM module; re-exports extract_and_persist, SidecarClient, ExtractStats
-|   |   +-- sidecar.rs           <- SidecarClient; supervisor loop; circuit breaker; JSON-RPC 2.0
+|   |   +-- sidecar.rs           <- SidecarClient; supervisor loop; circuit breaker; JSON-RPC 2.0; CircuitState + last_success_age; RpcMeta request_id envelope (ADR-028)
 |   |   +-- extractor.rs         <- extract_and_persist + extract_anchors_and_persist; validates + writes typed_relation / anchor_entities
+|   +-- observability/
+|   |   +-- mod.rs               <- startup Instant via OnceLock; init() + uptime() -> Option<Duration> (ADR-028)
+|   |   +-- throttle.rs          <- ThrottleLayer: per-callsite drop within configurable window; sidecar/llm allowlist; crash-class bypass; suppressed counter (ADR-028)
 +-- tests/                       <- extensive test suite (2 ignored: voyage integration, key-gated; 5 ignored sidecar integration)
 |   +-- common/mod.rs            <- shared helpers: test_db(), create_test_memory(), remember_input()
 |   +-- memory_crud.rs           <- CRUD, TTL, promote, schema idempotency
@@ -91,7 +95,7 @@ smriti/
 |   +-- config.md                <- config.toml reference + env vars + MCP connection
 |   +-- surrealdb-v3.md          <- SurrealDB v3 gotchas and dev notes
 |   +-- project-structure.md     <- this file
-|   +-- decisions/               <- Architecture Decision Records (ADR-001 through ADR-026)
+|   +-- decisions/               <- Architecture Decision Records (ADR-001 through ADR-028)
 +-- data/                        <- SurrealDB SurrealKV files (gitignored)
 +-- queue/                       <- instruction queue (gitignored)
 +-- archive/                     <- raw source material + exports (gitignored)

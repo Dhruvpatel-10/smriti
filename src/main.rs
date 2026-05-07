@@ -16,7 +16,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
 };
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use smriti::auth::{TokenMap, check_bearer};
 use smriti::config::AppConfig;
@@ -64,16 +64,106 @@ async fn ensure_auto_consolidator_agent(db: &SurrealClient) -> smriti::error::Re
     }
 }
 
+/// Resolve the desired log format. Caller's `config_format` wins over auto-detection;
+/// `SMRITI_LOG_FORMAT` env var wins over both. Unrecognised values fall back to auto-detect.
+fn resolve_log_format(config_format: Option<&str>) -> &'static str {
+    let raw = std::env::var("SMRITI_LOG_FORMAT")
+        .ok()
+        .or_else(|| config_format.map(|s| s.to_string()));
+    match raw.as_deref().map(str::trim) {
+        Some("journald") => "journald",
+        Some("json") => "json",
+        Some("pretty") => "pretty",
+        _ => {
+            if std::env::var_os("INVOCATION_ID").is_some() {
+                "journald"
+            } else {
+                "pretty"
+            }
+        }
+    }
+}
+
+/// Build the tracing Registry with EnvFilter, the throttle layer, and the
+/// chosen format layer. Falls back from journald to pretty if the journald
+/// socket is unavailable.
+fn init_tracing(config_format: Option<&str>) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let format = resolve_log_format(config_format);
+
+    let throttle =
+        smriti::observability::throttle::ThrottleLayer::new(Default::default());
+
+    let registry = tracing_subscriber::registry().with(env_filter).with(throttle);
+
+    match format {
+        "journald" => match tracing_journald::layer() {
+            Ok(journald) => {
+                registry.with(journald).init();
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[smriti] journald layer unavailable ({e}); falling back to pretty stderr"
+                );
+            }
+        },
+        "json" => {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::io::stderr);
+            registry.with(fmt_layer).init();
+            return;
+        }
+        _ => {}
+    }
+
+    // pretty (default) or journald-fallback path
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    registry.with(fmt_layer).init();
+}
+
+/// Send `READY=1` to systemd (no-op outside systemd) and, if the unit set
+/// `WATCHDOG_USEC`, start a background ticker that pings `WATCHDOG=1` at
+/// half the configured interval. The ticker is registered with the shared
+/// `TaskRegistry` so daemon shutdown cancels it cleanly.
+fn notify_systemd_ready(tasks: Arc<TaskRegistry>) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
+        tracing::debug!("sd_notify(READY=1) skipped: {e}");
+        return;
+    }
+    info!("notified systemd: READY=1");
+
+    // Watchdog setup — only when the unit specifies a WatchdogSec= or
+    // RuntimeWatchdogSec=. Half the interval is the recommended ping cadence.
+    let Some(window) = sd_notify::watchdog_enabled() else {
+        return;
+    };
+    let interval = window / 2;
+    let cancel = tasks.cancellation_token();
+    info!(?interval, "starting systemd watchdog ticker");
+    // Watchdog ticker is bound to the shared cancellation token so daemon
+    // shutdown stops it cleanly. We don't register it in TaskRegistry::spawn
+    // because that requires an async context — calling shutdown will fire
+    // the same token this task awaits.
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]) {
+                        tracing::warn!("sd_notify(WATCHDOG=1) failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Logging to stderr (stdout reserved for MCP protocol in stdio mode)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let base_dir = std::env::var("KB_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("cannot determine current directory"));
@@ -83,6 +173,18 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| std::env::current_dir().expect("cannot determine current directory"));
 
     let config = AppConfig::load(&config_dir).context("loading config")?;
+
+    // ADR-028: layered tracing init.
+    // Resolution: SMRITI_LOG_FORMAT env > config.observability.log_format >
+    // auto-detect (journald when INVOCATION_ID set, else pretty).
+    // Stdout is reserved for MCP protocol in stdio mode — all formats write to stderr or journald.
+    init_tracing(config.observability.log_format.as_deref());
+
+    // ADR-028 Step 4: per-stage recall latency histograms. Initialised once
+    // at daemon startup; record() and snapshot_and_reset() are no-ops until.
+    smriti::db::recall_metrics::init();
+    // ADR-028 Step 5: record startup instant for uptime in kb_status diagnostics.
+    smriti::observability::init();
 
     let db_path = config.db_path(&base_dir);
     let db = client::connect(&db_path).await.context("connecting to database")?;
@@ -978,6 +1080,11 @@ async fn run_http(
 
     info!("kb-server HTTP listening on http://{bind_addr}/mcp");
     info!("add to ~/.claude/settings.json: \"url\": \"http://{bind_addr}/mcp\"");
+
+    // ADR-028 Step 7: signal systemd that we are READY=1, then spin up the
+    // watchdog ticker if `WATCHDOG_USEC` is set in the unit. No-op when
+    // launched outside systemd (NOTIFY_SOCKET unset).
+    notify_systemd_ready(tasks.clone());
 
     loop {
         tokio::select! {

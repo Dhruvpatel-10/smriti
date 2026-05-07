@@ -4,6 +4,8 @@
 **Date:** 2026-04-30
 **Extends:** ADR-016 (Voyage AI cloud embedder backend)
 
+> **Default flipped to `enabled = true` 2026-05-07; see ADR-022.**
+
 ## Context
 
 ADR-016 added Voyage AI `voyage-4-large` embeddings, yielding ~+8 MTEB lift over the
@@ -124,7 +126,11 @@ into a brick on a flight.
 
 For existing operators on Voyage embeddings (ADR-016):
 
-1. Add to `config.toml`:
+1. The reranker is now enabled by default (`enabled = true`). No `config.toml`
+   changes are required for new deployments. For existing deployments, confirm
+   `VOYAGE_API_KEY` is set and `embeddings.provider = "voyage"` — the reranker
+   is silently skipped if either guard is missing (see `src/server.rs` triple
+   guard). Optionally add:
    ```toml
    [embeddings.voyage.reranker]
    enabled = true

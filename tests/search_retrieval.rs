@@ -3,7 +3,7 @@ use common::{test_db, create_test_memory};
 
 use chrono::{Duration, Utc};
 use smriti::config::{EdgeWeightsConfig, FusionConfig, FusionStrategy, SpreadingConfig};
-use smriti::db::{graph, memory, search, typed_relation};
+use smriti::db::{graph, memory, recall_metrics, search, typed_relation};
 use smriti::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -19,7 +19,7 @@ async fn recall_empty_query_returns_all_active() {
     let id3 = create_test_memory(&db, "gamma").await;
     memory::archive(&db, &id3, InvalidationReason::Forgotten).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(results.len(), 2, "should return only active memories");
 }
 
@@ -34,7 +34,7 @@ async fn recall_filters_by_type() {
         memory::MemoryDraft::new("standup notes".into(), MemoryType::Episodic, MemorySubtype::Meeting, None, Some(Modality::Transcript))).await.unwrap();
 
     let results = search::recall(
-        &db, "", None, None, Some(MemoryType::Semantic), None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, Some(MemoryType::Semantic), None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].memory_type, MemoryType::Semantic);
@@ -53,7 +53,7 @@ async fn recall_filters_by_project() {
             .project("proj-b".into())).await.unwrap();
 
     let results = search::recall(
-        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].project.as_deref(), Some("proj-a"));
@@ -75,7 +75,7 @@ async fn recall_filters_by_time_range() {
     let results = search::recall(
         &db, "", None, None, None, None, None, None,
         Some(now - Duration::days(7)),
-        None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
     assert_eq!(results.len(), 1, "should only return the recent memory");
     assert_eq!(results[0].summary, "recent memory");
@@ -89,7 +89,7 @@ async fn recall_respects_limit() {
         create_test_memory(&db, &format!("memory {i}")).await;
     }
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 3, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 3, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -101,7 +101,7 @@ async fn recall_limit_capped_at_50() {
         create_test_memory(&db, &format!("memory {i}")).await;
     }
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 100, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 100, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert!(results.len() <= 50, "limit should be capped at 50, got {}", results.len());
 }
 
@@ -116,7 +116,7 @@ async fn recall_excludes_archived_and_superseded() {
     memory::archive(&db, &archived, InvalidationReason::Forgotten).await.unwrap();
     memory::supersede(&db, &superseded, Utc::now()).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, active);
 }
@@ -125,7 +125,7 @@ async fn recall_excludes_archived_and_superseded() {
 async fn recall_on_empty_db_returns_empty() {
     let (db, _dir) = test_db().await;
 
-    let results = search::recall(&db, "anything", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "anything", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert!(results.is_empty());
 }
 
@@ -145,7 +145,7 @@ async fn recall_filters_by_domain() {
         memory::MemoryDraft::new("project decision".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))
             .project("proj-a".into())).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].summary, "gym workout PR");
 }
@@ -293,7 +293,7 @@ async fn recall_includes_graph_neighbors_via_spreading_activation() {
     // (empty query returns all, so both would appear regardless)
     // Instead, recall with limit=25 to get everything + spreading activation
     let results = search::recall(
-        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
 
     // Both should be present (primary directly, related via spreading activation or direct match)
@@ -315,13 +315,13 @@ async fn memory_with_multiple_domains_found_by_any() {
             .domain(vec!["health".into(), "learning".into()])).await.unwrap();
 
     // Should be found by either domain
-    let health = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let health = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(health.len(), 1, "should find by 'health' domain");
 
-    let learning = search::recall(&db, "", None, None, None, None, Some("learning"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let learning = search::recall(&db, "", None, None, None, None, Some("learning"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(learning.len(), 1, "should find by 'learning' domain");
 
-    let finance = search::recall(&db, "", None, None, None, None, Some("finance"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let finance = search::recall(&db, "", None, None, None, None, Some("finance"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
     assert_eq!(finance.len(), 0, "should NOT find by unrelated domain");
 }
 
@@ -346,7 +346,7 @@ async fn recall_filters_by_type_and_project_combined() {
 
     // Filter: type=Semantic + project=proj-a
     let results = search::recall(
-        &db, "", None, None, Some(MemoryType::Semantic), Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, Some(MemoryType::Semantic), Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
 
     assert_eq!(results.len(), 2, "should return both Semantic memories in proj-a");
@@ -369,7 +369,7 @@ async fn person_filter_works_with_entity_table() {
 
     // Filter by person=Bob
     let results = search::recall(
-        &db, "", None, None, None, None, None, Some("Bob"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, None, None, None, Some("Bob"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "should find exactly 1 memory involving Bob");
@@ -383,7 +383,7 @@ async fn person_filter_no_match_returns_empty() {
     create_test_memory(&db, "some memory").await;
 
     let results = search::recall(
-        &db, "", None, None, None, None, None, Some("Nonexistent Person"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &db, "", None, None, None, None, None, Some("Nonexistent Person"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     ).await.unwrap();
 
     assert!(results.is_empty(), "person filter with no match should return empty");
@@ -410,7 +410,7 @@ async fn recall_returns_higher_importance_first() {
         memory::MemoryDraft::new("medium importance".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
             .importance(Importance::new(3).unwrap())).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
 
     assert_eq!(results.len(), 3);
     // Results sorted by importance DESC (no lost-in-middle reordering — that belongs in the client)
@@ -442,7 +442,7 @@ async fn recall_filter_by_channel_slack_returns_two() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Slack), None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
     ).await.unwrap();
 
     assert_eq!(results.len(), 2, "channel=Slack should return 2 memories, got {}", results.len());
@@ -468,7 +468,7 @@ async fn recall_filter_by_modality_transcript_returns_one() {
         &db, "", None, None, None, None, None, None, None, None,
         None, Some(Modality::Transcript),
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "modality=Transcript should return 1 memory, got {}", results.len());
@@ -495,7 +495,7 @@ async fn recall_filter_by_channel_and_modality_returns_one() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Slack), Some(Modality::Text),
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "channel=Slack AND modality=Text should return 1 memory, got {}", results.len());
@@ -522,7 +522,7 @@ async fn recall_filter_by_channel_cli_excludes_slack_memories() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Cli), None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "channel=Cli should return only 1 memory, got {}", results.len());
@@ -549,7 +549,7 @@ async fn recall_no_channel_modality_filter_returns_all() {
         &db, "", None, None, None, None, None, None, None, None,
         None, None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
     ).await.unwrap();
 
     assert_eq!(results.len(), 3, "no channel/modality filter should return all 3 memories, got {}", results.len());
@@ -635,6 +635,7 @@ async fn spreading_activation_includes_typed_relation_neighbors() {
         &Default::default(),
         &Default::default(),
         RerankerPolicy::default(),
+        None,
         None,
     )
     .await
@@ -771,6 +772,7 @@ async fn spreading_activation_excludes_retracted_typed_relations() {
         &Default::default(),
         RerankerPolicy::default(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -876,6 +878,7 @@ async fn weighted_spreading_derives_beats_involves() {
         &Default::default(),
         RerankerPolicy::default(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -977,6 +980,7 @@ async fn weighted_spreading_typed_relation_confidence_ordering() {
         &Default::default(),
         RerankerPolicy::default(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1075,6 +1079,7 @@ async fn weighted_spreading_custom_config_changes_order() {
         &Default::default(),
         RerankerPolicy::default(),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1118,6 +1123,7 @@ async fn weighted_spreading_custom_config_changes_order() {
         &custom_cfg,
         &Default::default(),
         RerankerPolicy::default(),
+        None,
         None,
     )
     .await
@@ -1173,7 +1179,7 @@ async fn recall_with_convex_fusion_wires_correctly() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &Default::default(),
-        RerankerPolicy::default(), None,
+        RerankerPolicy::default(), None, None,
     )
     .await
     .unwrap();
@@ -1183,7 +1189,7 @@ async fn recall_with_convex_fusion_wires_correctly() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &fusion_cfg,
-        RerankerPolicy::default(), None,
+        RerankerPolicy::default(), None, None,
     )
     .await
     .unwrap();
@@ -1222,10 +1228,736 @@ async fn recall_cc_empty_result_with_no_matches() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &fusion_cfg,
-        RerankerPolicy::default(), None,
+        RerankerPolicy::default(), None, None,
     )
     .await
     .unwrap();
 
     assert!(results.is_empty(), "CC should return empty when no BM25 matches");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPREADING ACTIVATION STRUCTURAL HARDENING TESTS (ADR-029)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `derives` edge (weight 1.0) must rank strictly above `relates` edge (weight 0.5)
+/// when both are SA neighbors and cap=1 forces a winner.
+///
+/// Position pin: results[1].id == M1 (derives).
+/// M2 (relates) must be absent because cap=1 selects only the highest-weighted neighbor.
+/// This is stricter than the set-membership tests: it asserts the exact index of the
+/// winner, not just that it is present somewhere in the result set.
+#[tokio::test]
+async fn spreading_activation_position_pins_derives_above_relates() {
+    let (db, _dir) = test_db().await;
+
+    // Seed — the only memory in its domain so BM25 returns only this one.
+    let seed = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "seed for derives-above-relates position test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-pos-pin".into())
+        .domain(vec!["domain-pos-pin-seed".into()]),
+    )
+    .await
+    .unwrap();
+
+    // M1 — linked via `derives` (weight 1.0); unique summary, not BM25-matchable.
+    let m1_derives = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "derives neighbor for position pin test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-pos-pin".into()),
+    )
+    .await
+    .unwrap();
+
+    // M2 — linked via `relates` (weight 0.5); unique summary, not BM25-matchable.
+    let m2_relates = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "relates neighbor for position pin test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-pos-pin".into()),
+    )
+    .await
+    .unwrap();
+
+    graph::link_memories(&db, &seed, &m1_derives, RelationType::Derives)
+        .await
+        .unwrap();
+    graph::link_memories(&db, &seed, &m2_relates, RelationType::Relates)
+        .await
+        .unwrap();
+
+    // cap=1: SA must select the derives neighbor (weight 1.0) over the relates neighbor
+    // (weight 0.5). BM25 domain filter ensures only seed appears from the primary query.
+    let cfg = SpreadingConfig {
+        cap: 1,
+        ..Default::default()
+    };
+
+    let results = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-pos-pin"),
+        Some("domain-pos-pin-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        25,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Position 0 is the seed from BM25.
+    assert_eq!(
+        results.len(), 2,
+        "expected seed + 1 SA neighbor (cap=1); got {:?}",
+        results.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(results[0].id, seed, "position 0 must be the seed");
+
+    // Position 1 must be the derives neighbor (weight 1.0 > 0.5).
+    // cap=1 selects only the winner, so this assertion pins the index directly.
+    assert_eq!(
+        results[1].id, m1_derives,
+        "position 1 must be derives neighbor (weight 1.0); got {} — relates neighbor displaced derives",
+        results[1].id.as_str()
+    );
+
+    // The relates neighbor must not appear anywhere (cap=1 excluded it).
+    let ids: Vec<&str> = results.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        !ids.contains(&m2_relates.as_str()),
+        "relates neighbor (weight 0.5) must be excluded when cap=1 and derives neighbor is present; results: {ids:?}"
+    );
+}
+
+/// `typed_relation` with confidence=0.9 (effective score ≈ 0.9 × 0.9 × 0.5 = 0.405)
+/// must rank above an `involves` neighbor (score ≈ 0.3 × 0.5 = 0.15) when cap=1.
+///
+/// Position pin: results[1].id == m_typed.
+/// m_inv must be absent because cap=1 selects only the highest-score neighbor.
+/// Asserts exact index (not just membership) — hub-displacement regressions that
+/// flip typed_relation below involves would be caught even if both IDs appeared.
+#[tokio::test]
+async fn spreading_activation_typed_relation_outranks_involves() {
+    let (db, _dir) = test_db().await;
+
+    let seed = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "seed for typed-relation-vs-involves ranking test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-tr-vs-inv".into())
+        .domain(vec!["domain-tr-vs-inv-seed".into()]),
+    )
+    .await
+    .unwrap();
+
+    // Linked via typed_relation at high confidence=0.9.
+    // SA score = confidence × typed_relation_max × hop_decay = 0.9 × 0.9 × 0.5 = 0.405
+    let m_typed = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "typed relation neighbor for ranking test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-tr-vs-inv".into()),
+    )
+    .await
+    .unwrap();
+
+    // Linked via shared entity (involves).
+    // SA score = involves_weight × hop_decay = 0.3 × 0.5 = 0.15
+    let m_inv = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "involves neighbor for ranking test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-tr-vs-inv".into()),
+    )
+    .await
+    .unwrap();
+
+    typed_relation::upsert(&db, &seed, &m_typed, RelationKind::Causes, 0.9, "test/v1", &seed)
+        .await
+        .unwrap();
+
+    graph::link_entity(&db, &seed, "shared-entity-tr-vs-inv-test").await.unwrap();
+    graph::link_entity(&db, &m_inv, "shared-entity-tr-vs-inv-test").await.unwrap();
+
+    // cap=1: SA must select the typed_relation neighbor (score 0.405) over the involves
+    // neighbor (score 0.15). Domain filter ensures only seed appears from BM25.
+    let cfg = SpreadingConfig {
+        cap: 1,
+        ..Default::default()
+    };
+
+    let results = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-tr-vs-inv"),
+        Some("domain-tr-vs-inv-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        25,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        results.len(), 2,
+        "expected seed + 1 SA neighbor (cap=1); got {:?}",
+        results.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(results[0].id, seed, "position 0 must be the seed");
+
+    // Position 1 must be m_typed (score 0.405). cap=1 selects only the winner,
+    // so this assertion pins the index directly.
+    assert_eq!(
+        results[1].id, m_typed,
+        "position 1 must be typed_relation neighbor (score 0.405); got {} — involves neighbor displaced typed_relation",
+        results[1].id.as_str()
+    );
+
+    // The involves neighbor must not appear anywhere (cap=1 excluded it).
+    let ids: Vec<&str> = results.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        !ids.contains(&m_inv.as_str()),
+        "involves neighbor (score 0.15) must be excluded when cap=1 and typed_relation neighbor is present; results: {ids:?}"
+    );
+}
+
+/// An entity with degree > `involves_hub_cap` must NOT contribute SA neighbors
+/// via the `involves` traversal.  The same entity below the cap MUST contribute.
+///
+/// Two sub-assertions in one test function to share the expensive fixture (48 extra
+/// memories that inflate Hub's degree) — each assertion is independent and labelled.
+///
+/// **Fixture design**: 48 fillers live in "proj-hub-fillers" (a different project
+/// from seed/target in "proj-hub-cap"). This gives Hub degree = 50
+/// (seed=1 + target=1 + 48 fillers).
+///
+/// Two cap values are used:
+/// - `involves_hub_cap=49`: degree 50 > 49 → Hub suppressed → target absent ✓
+/// - `involves_hub_cap=100`: degree 50 ≤ 100 → Hub admitted. SA scoring selects
+///   all 49 non-seed candidates (target + 48 fillers), which fits within
+///   effective_cap=49 (recall limit=50, 1 BM25 result). The SA fetch's project
+///   filter then drops the 48 fillers, leaving only target. ✓
+#[tokio::test]
+async fn hub_degree_cap_blocks_super_hub_entity() {
+    let (db, _dir) = test_db().await;
+
+    let hub_entity = "hub-entity-degree-cap-test";
+
+    // Seed — appears in BM25 via domain filter; also involves Hub.
+    let seed = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "seed memory for hub degree cap test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-hub-cap".into())
+        .domain(vec!["domain-hub-cap-seed".into()]),
+    )
+    .await
+    .unwrap();
+    graph::link_entity(&db, &seed, hub_entity).await.unwrap();
+
+    // target_memory — in same project as seed; reachable only via Hub involves path.
+    let target = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "target memory linked via hub entity".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-hub-cap".into()),
+    )
+    .await
+    .unwrap();
+    graph::link_entity(&db, &target, hub_entity).await.unwrap();
+
+    // 48 fillers in a DIFFERENT project inflate Hub's degree to 50 without
+    // polluting the proj-hub-cap recall (SA fetch applies project filter).
+    // Hub degree = 50 (seed=1 + target=1 + 48 fillers).
+    for i in 0..48usize {
+        let filler = memory::create(
+            &db,
+            memory::MemoryDraft::new(
+                format!("filler memory {i} for hub degree inflation"),
+                MemoryType::Semantic,
+                MemorySubtype::Fact,
+                Some(Channel::Cli),
+                Some(Modality::Text),
+            )
+            .project("proj-hub-fillers".into()),
+        )
+        .await
+        .unwrap();
+        graph::link_entity(&db, &filler, hub_entity).await.unwrap();
+    }
+    // Hub degree is now 50 (seed + target + 48 fillers).
+
+    // ── Sub-assertion A: involves_hub_cap=49 suppresses Hub (degree 50 > 49). ──
+    // SA must skip Hub entirely; target (reachable only via Hub) must be absent.
+    let cfg_blocked = SpreadingConfig {
+        cap: 10,
+        edge_weights: EdgeWeightsConfig {
+            involves_hub_cap: 49,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let results_blocked = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-hub-cap"),
+        Some("domain-hub-cap-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        25,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg_blocked,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let ids_blocked: Vec<&str> = results_blocked.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        !ids_blocked.contains(&target.as_str()),
+        "with hub_cap=49, target must NOT appear via Hub (degree 50 > 49); results: {ids_blocked:?}"
+    );
+
+    // ── Sub-assertion B: involves_hub_cap=100 admits Hub (degree 50 ≤ 100). ──
+    // SA scoring generates 49 candidates (target + 48 fillers, seed excluded).
+    // recall limit=50 → effective_cap = min(100, 49) = 49 → all 49 candidates
+    // are scored and selected. SA fetch project filter drops 48 fillers
+    // (proj-hub-fillers ≠ proj-hub-cap) → only target is returned.
+    let cfg_allowed = SpreadingConfig {
+        cap: 100,
+        edge_weights: EdgeWeightsConfig {
+            involves_hub_cap: 100,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let results_allowed = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-hub-cap"),
+        Some("domain-hub-cap-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        50, // limit=50 gives effective_cap=49, fitting all 49 candidates
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg_allowed,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let ids_allowed: Vec<&str> = results_allowed.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        ids_allowed.contains(&target.as_str()),
+        "with hub_cap=100, target MUST appear via Hub (degree 50 ≤ 100, all 49 candidates fit in effective_cap=49, project filter keeps target); results: {ids_allowed:?}"
+    );
+}
+
+/// `spreading_override=Some(false)` suppresses the SA stage entirely:
+///   - the SA neighbor does not appear in results,
+///   - `recall_metrics::snapshot_and_reset()` reports `candidates_seen == 0`
+///     for that call's interval (no `record_sa` invocation).
+///
+/// `Some(true)` re-enables the stage: the SA neighbor reappears and
+/// `candidates_seen >= 1` after a fresh snapshot.
+#[tokio::test]
+async fn spreading_override_false_skips_stage() {
+    // Ensure the global metrics recorder is initialised so snapshot_and_reset
+    // returns Some(…) rather than None.
+    recall_metrics::init();
+
+    let (db, _dir) = test_db().await;
+
+    let seed = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "seed memory for spreading override false test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-spread-override".into())
+        .domain(vec!["domain-spread-override-seed".into()]),
+    )
+    .await
+    .unwrap();
+
+    let neighbor = memory::create(
+        &db,
+        memory::MemoryDraft::new(
+            "derives neighbor for spreading override test".into(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+        .project("proj-spread-override".into()),
+    )
+    .await
+    .unwrap();
+
+    graph::link_memories(&db, &seed, &neighbor, RelationType::Derives)
+        .await
+        .unwrap();
+
+    let cfg = SpreadingConfig {
+        cap: 3,
+        ..Default::default()
+    };
+
+    // ── False override: SA must be suppressed. ──
+
+    // Drain any previously accumulated metrics so the snapshot below is clean
+    // for the single call that follows.
+    let _ = recall_metrics::snapshot_and_reset();
+
+    let results_false = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-spread-override"),
+        Some("domain-spread-override-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        25,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        Some(false), // spreading_override = false
+    )
+    .await
+    .unwrap();
+
+    let ids_false: Vec<&str> = results_false.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        !ids_false.contains(&neighbor.as_str()),
+        "spreading_override=false must suppress neighbor from results; results: {ids_false:?}"
+    );
+
+    // Snapshot covers the interval since the drain above.
+    // Because spreading_override=false causes the SA block to be skipped entirely,
+    // record_sa() is never called and candidates_seen must be zero.
+    // (Other tests running concurrently cannot contribute candidates_seen for this
+    //  specific call — only this call's code path runs record_sa, and it was skipped.)
+    let snap_false = recall_metrics::snapshot_and_reset()
+        .expect("recall_metrics must be initialised after init()");
+    assert_eq!(
+        snap_false.sa_stats.candidates_seen, 0,
+        "spreading_override=false must produce candidates_seen=0; got {:?}",
+        snap_false.sa_stats
+    );
+
+    // ── True override: SA must be enabled and neighbor must appear. ──
+
+    // Drain so the next snapshot covers only the Some(true) call.
+    let _ = recall_metrics::snapshot_and_reset();
+
+    let results_true = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-spread-override"),
+        Some("domain-spread-override-seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        25,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        Some(true), // spreading_override = true
+    )
+    .await
+    .unwrap();
+
+    let ids_true: Vec<&str> = results_true.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        ids_true.contains(&neighbor.as_str()),
+        "spreading_override=true must include neighbor in results; results: {ids_true:?}"
+    );
+
+    let snap_true = recall_metrics::snapshot_and_reset()
+        .expect("recall_metrics must be initialised after init()");
+    assert!(
+        snap_true.sa_stats.candidates_seen >= 1,
+        "spreading_override=true must produce candidates_seen>=1; got {:?}",
+        snap_true.sa_stats
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERSON-FILTER HUB-CAP (ADR-029, search.rs Step 4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An entity whose `involves` degree exceeds `involves_hub_cap` must be skipped
+/// by the person-filter traversal entirely (ADR-029 hub-cap, Step 4 of recall).
+///
+/// Fixture:
+/// - Hub entity "HubPersonFilterCapTest" is linked to N memories, where N > cap.
+/// - `recall` is called with `person="HubPersonFilterCapTest"` and the cap set
+///   to N-1, so degree > cap.
+/// - Expected: empty result set (hub is skipped → entity_mem_ids empty → memories cleared).
+#[tokio::test]
+async fn person_filter_hub_cap_skips_over_cap_entity() {
+    let (db, _dir) = test_db().await;
+
+    let hub_name = "HubPersonFilterCapTest";
+    let cap: u32 = 5;
+    let degree: usize = cap as usize + 1; // 6 — one above cap
+
+    // Link `degree` memories to the hub entity.
+    for i in 0..degree {
+        let id = memory::create(
+            &db,
+            memory::MemoryDraft::new(
+                format!("hub person filter cap memory {i}"),
+                MemoryType::Semantic,
+                MemorySubtype::Fact,
+                Some(Channel::Cli),
+                Some(Modality::Text),
+            )
+            .project("proj-pfhub-blocked".into()),
+        )
+        .await
+        .expect("create memory");
+        graph::link_entity(&db, &id, hub_name)
+            .await
+            .expect("link_entity");
+    }
+    // Hub degree is now `degree` (= cap + 1).
+
+    // Build a SpreadingConfig whose involves_hub_cap equals `cap` (< degree).
+    let cfg_blocked = SpreadingConfig {
+        cap: 50,
+        edge_weights: EdgeWeightsConfig {
+            involves_hub_cap: cap,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let results = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-pfhub-blocked"),
+        None,
+        Some(hub_name), // person filter
+        None,
+        None,
+        None,
+        None,
+        50,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg_blocked,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .expect("recall");
+
+    assert!(
+        results.is_empty(),
+        "person filter must return empty when hub degree ({degree}) > involves_hub_cap ({cap}); got {} results",
+        results.len(),
+    );
+}
+
+/// An entity whose `involves` degree is at or below `involves_hub_cap` must NOT
+/// be skipped — all linked memories must appear in the person-filter results.
+///
+/// This is the complementary sub-assertion to `person_filter_hub_cap_skips_over_cap_entity`.
+#[tokio::test]
+async fn person_filter_below_hub_cap_returns_all_linked_memories() {
+    let (db, _dir) = test_db().await;
+
+    let person_name = "BelowCapPersonFilter";
+    let cap: u32 = 10;
+    let degree: usize = cap as usize - 1; // 9 — comfortably below cap
+
+    let mut expected_ids = Vec::new();
+
+    // Link `degree` memories to the entity.
+    for i in 0..degree {
+        let id = memory::create(
+            &db,
+            memory::MemoryDraft::new(
+                format!("below cap person filter memory {i}"),
+                MemoryType::Semantic,
+                MemorySubtype::Fact,
+                Some(Channel::Cli),
+                Some(Modality::Text),
+            )
+            .project("proj-pfhub-allowed".into()),
+        )
+        .await
+        .expect("create memory");
+        graph::link_entity(&db, &id, person_name)
+            .await
+            .expect("link_entity");
+        expected_ids.push(id);
+    }
+
+    // Cap is set to `cap` (> degree), so the entity is admitted.
+    let cfg_allowed = SpreadingConfig {
+        cap: 50,
+        edge_weights: EdgeWeightsConfig {
+            involves_hub_cap: cap,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let results = search::recall(
+        &db,
+        "",
+        None,
+        None,
+        None,
+        Some("proj-pfhub-allowed"),
+        None,
+        Some(person_name), // person filter
+        None,
+        None,
+        None,
+        None,
+        50,
+        &search::AuthorFilter::None,
+        0.0,
+        &cfg_allowed,
+        &Default::default(),
+        RerankerPolicy::default(),
+        None,
+        None,
+    )
+    .await
+    .expect("recall");
+
+    let result_ids: Vec<&str> = results.iter().map(|m| m.id.as_str()).collect();
+
+    assert_eq!(
+        results.len(),
+        degree,
+        "all {degree} memories must be returned when degree ({degree}) <= involves_hub_cap ({cap}); got {result_ids:?}",
+    );
+
+    for expected in &expected_ids {
+        assert!(
+            result_ids.contains(&expected.as_str()),
+            "memory {} must appear in person-filter results; result_ids: {result_ids:?}",
+            expected.as_str()
+        );
+    }
 }

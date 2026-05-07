@@ -24,6 +24,25 @@ pub struct AppConfig {
     pub consolidation: ConsolidationConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+}
+
+/// Observability configuration (ADR-028).
+///
+/// `log_format` selects the tracing output layer:
+/// - `"journald"` — native systemd journald datagrams (structured fields query-friendly).
+/// - `"json"`     — NDJSON to stderr.
+/// - `"pretty"`   — human-readable to stderr (default for terminals).
+///
+/// Resolution order at startup:
+/// 1. `SMRITI_LOG_FORMAT` env var
+/// 2. `[observability].log_format` in config.toml
+/// 3. Auto-detect: `journald` when `INVOCATION_ID` is set (running under systemd), `pretty` otherwise.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ObservabilityConfig {
+    #[serde(default)]
+    pub log_format: Option<String>,
 }
 
 /// HTTP server configuration. Nested under `[server]` in config.toml.
@@ -65,7 +84,7 @@ impl Default for AuthConfig {
 
 /// Per-edge-type weight overrides for spreading activation.
 /// All fields default to the ADR-023 calibrated starting values.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EdgeWeightsConfig {
     /// Causal provenance edges (sidecar-extracted). Full propagation.
     #[serde(default = "default_weight_derives")]
@@ -87,6 +106,16 @@ pub struct EdgeWeightsConfig {
     /// extractions approach `derives`; low-confidence approach `relates`.
     #[serde(default = "default_weight_typed_relation_max")]
     pub typed_relation_max: f64,
+    /// Minimum confidence for LLM-extracted typed_relation edges to participate in
+    /// spreading activation. Edges below this floor are skipped. ADR-029.
+    /// Surfaced to config so operators can adjust after sidecar model swaps.
+    #[serde(default = "default_typed_relation_confidence_floor")]
+    pub typed_relation_confidence_floor: f64,
+    /// Skip any entity node on an `involves` edge whose degree exceeds this cap.
+    /// Prevents super-hub entities (corpus-wide names, frequent collaborators) from
+    /// flooding the neighbor set with uncorrelated memories. ADR-029.
+    #[serde(default = "default_involves_hub_cap")]
+    pub involves_hub_cap: u32,
 }
 
 fn default_weight_derives() -> f64 { 1.0 }
@@ -95,6 +124,8 @@ fn default_weight_updates() -> f64 { 0.8 }
 fn default_weight_relates() -> f64 { 0.5 }
 fn default_weight_involves() -> f64 { 0.3 }
 fn default_weight_typed_relation_max() -> f64 { 0.9 }
+fn default_typed_relation_confidence_floor() -> f64 { 0.5 }
+fn default_involves_hub_cap() -> u32 { 50 }
 
 impl Default for EdgeWeightsConfig {
     fn default() -> Self {
@@ -105,13 +136,15 @@ impl Default for EdgeWeightsConfig {
             relates: default_weight_relates(),
             involves: default_weight_involves(),
             typed_relation_max: default_weight_typed_relation_max(),
+            typed_relation_confidence_floor: default_typed_relation_confidence_floor(),
+            involves_hub_cap: default_involves_hub_cap(),
         }
     }
 }
 
 /// Configuration for the spreading-activation stage of recall (ADR-023).
 /// Nested under `[search.spreading]` in config.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpreadingConfig {
     /// Maximum number of spreading-activation neighbors added to the result set.
     /// Default 3 — was previously hardcoded.
@@ -354,10 +387,10 @@ fn default_voyage_timeout() -> u64 {
 }
 
 /// Voyage AI reranker configuration. Nested under `[embeddings.voyage.reranker]`.
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct VoyageRerankerConfig {
-    /// Enable the cross-encoder reranker (stage 3.5). Default: false.
-    #[serde(default)]
+    /// Enable the cross-encoder reranker (stage 3.5). Default: true (ADR-022).
+    #[serde(default = "default_reranker_enabled")]
     pub enabled: bool,
     /// Reranker model name. Default: "rerank-2.5-lite".
     #[serde(default = "default_reranker_model")]
@@ -370,11 +403,25 @@ pub struct VoyageRerankerConfig {
     pub policy: crate::types::RerankerPolicy,
 }
 
+fn default_reranker_enabled() -> bool {
+    true
+}
 fn default_reranker_model() -> String {
     "rerank-2.5-lite".to_string()
 }
 fn default_reranker_top_k() -> usize {
     50
+}
+
+impl Default for VoyageRerankerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reranker_enabled(),
+            model: default_reranker_model(),
+            top_k_input: default_reranker_top_k(),
+            policy: crate::types::RerankerPolicy::default(),
+        }
+    }
 }
 
 impl Default for VoyageConfig {
@@ -648,5 +695,22 @@ mod tests {
         assert!((decoded.confidence_threshold - 0.7).abs() < f32::EPSILON);
         assert_eq!(decoded.request_timeout_ms, 30000);
         assert_eq!(decoded.max_consecutive_failures, 5);
+    }
+
+    #[test]
+    fn reranker_config_default_enabled_true() {
+        // Belt-and-braces: manual Default impl must set enabled=true (ADR-022).
+        // Guards against someone re-adding #[derive(Default)] which would flip this to false.
+        assert!(VoyageRerankerConfig::default().enabled);
+    }
+
+    #[test]
+    fn reranker_config_serde_missing_field_enabled_true() {
+        // Guards the serde path: default_reranker_enabled() must remain wired to the
+        // #[serde(default = "...")] attribute. If that linkage is severed, serde would
+        // fall back to bool's own default (false) and this test catches it.
+        let decoded: VoyageRerankerConfig =
+            serde_json::from_str("{}").expect("empty object deserialize");
+        assert!(decoded.enabled);
     }
 }

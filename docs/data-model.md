@@ -56,6 +56,34 @@ entity {
 - Stale contact alerts fire when `last_contact` exceeds configured threshold
 - Projects can be entities with lifecycle attrs (status, killed_reason, pivoted_to)
 
+**`EntityFull`** (returned by `kb_entity_get`) and **`EntitySummary`** (returned by `kb_entity_find`) both carry `aliases: Vec<String>` — the active (non-archived) alias values for that entity.
+
+## entity_alias Table (Migration 021, ADR-030)
+
+A separate SCHEMAFULL table — NOT a RELATE edge — that maps alias strings to canonical entities. Chosen over an `aliases: array<string>` field on `entity` to enable DB-level per-element UNIQUE, per-element bitemporal timestamps, and clean per-element FTS scoring.
+
+```surql
+DEFINE TABLE entity_alias SCHEMAFULL;
+DEFINE FIELD entity_id   ON entity_alias TYPE record<entity>;
+DEFINE FIELD `value`     ON entity_alias TYPE string ASSERT string::len($value) >= 3;
+DEFINE FIELD valid_from  ON entity_alias TYPE datetime DEFAULT time::now();
+DEFINE FIELD valid_until ON entity_alias TYPE option<datetime>;
+DEFINE FIELD added_by    ON entity_alias TYPE option<record<agent>>;
+DEFINE FIELD archived_at ON entity_alias TYPE option<datetime>;
+DEFINE INDEX idx_alias_value_unique ON entity_alias FIELDS `value` UNIQUE;
+DEFINE INDEX idx_alias_entity_id    ON entity_alias FIELDS entity_id;
+DEFINE ANALYZER alias_analyzer TOKENIZERS blank FILTERS lowercase;
+DEFINE INDEX idx_alias_value_ft     ON entity_alias FIELDS `value` FULLTEXT ANALYZER alias_analyzer BM25;
+```
+
+Key constraints:
+- `value` is a reserved keyword in SurrealDB v3 (single-field projection shorthand); must be backtick-escaped as `` `value` `` in all SurrealQL.
+- `UNIQUE` on `idx_alias_value_unique` — alias namespace is global; the same alias string cannot point to two canonical entities.
+- Minimum alias length: 3 characters (DB-level ASSERT).
+- `blank` tokenizer — splits on whitespace only; does not break short names like "Bo" or "Al" into sub-tokens that generate false positives.
+- All reads filter `archived_at IS NONE` (soft-delete invariant, same pattern as `memory` and `entity`).
+- Bitemporal: `valid_from`/`valid_until` make alias membership a first-class temporal fact; `kb_recall_at` can reconstruct the alias set active at any `as_of` timestamp via `entity_alias::resolve_at`.
+
 ## Graph Edges
 
 ```

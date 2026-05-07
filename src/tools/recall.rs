@@ -43,6 +43,10 @@ pub struct RecallInput {
     /// Omit to use the configured policy (default: adaptive). ADR-022.
     #[serde(default)]
     pub rerank: Option<bool>,
+    /// Caller spreading override: false = skip spreading-activation stage. ADR-029.
+    /// Omit to apply the default policy (walk unless corpus is tiny).
+    #[serde(default)]
+    pub spreading: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -111,6 +115,7 @@ pub async fn execute(
 
     let min_score = input.min_score.unwrap_or(0.0).max(0.0) as f64;
     let caller_override = input.rerank;
+    let spreading_override = input.spreading;
     let policy = reranker
         .as_deref()
         .map(|r| r.policy())
@@ -136,6 +141,7 @@ pub async fn execute(
         fusion_cfg,
         policy,
         caller_override,
+        spreading_override,
     )
     .await?;
 

@@ -1,7 +1,8 @@
 use surrealdb::types::RecordId;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use crate::db::client::SurrealClient;
+use crate::db::entity_alias;
 use crate::error::{KbError, Result};
 use crate::types::*;
 
@@ -48,38 +49,83 @@ pub async fn link_memories(
 }
 
 /// Link a memory to an entity (involves relation).
-/// The entity is upserted with kind "person" if it doesn't already exist.
+///
+/// Resolution order:
+/// 1. Exact canonical name match.
+/// 2. If no entity found with this name, check alias index for a canonical entity.
+/// 3. If still no match, create a new entity with kind "person" (default for
+///    memories' people field).
+///
+/// Using the canonical entity from alias resolution means that writing "Bob"
+/// in a memory's people field will link to the canonical "Robert Smith" entity
+/// when "bob" is registered as an alias — preserving entity graph integrity.
 #[instrument(skip(db))]
 pub async fn link_entity(
     db: &SurrealClient,
     memory_id: &MemoryId,
     entity_name: &str,
 ) -> Result<()> {
-    // Upsert entity with kind "person" (default when linking from memory people field).
-    // Also updates attrs.last_contact so stale contact alerts can fire.
     let now = chrono::Utc::now();
     let now_str = now.to_rfc3339();
+
+    // Check if a canonical entity exists for this name (or alias).
+    let mut name_result = db
+        .query("SELECT id, name FROM entity WHERE name = $name AND archived_at IS NONE LIMIT 1")
+        .bind(("name", entity_name.to_string()))
+        .await
+        .map_err(|e| KbError::db("looking up entity by name", e))?;
+    let name_rows: Vec<serde_json::Value> = name_result.take(0).unwrap_or_default();
+
+    let canonical_name: String = if let Some(row) = name_rows.into_iter().next() {
+        // Canonical name match found.
+        row.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(entity_name)
+            .to_string()
+    } else {
+        // Try alias resolution before falling through to create a new entity.
+        let alias_ids = entity_alias::resolve(db, entity_name).await.unwrap_or_default();
+        if let Some(eid) = alias_ids.into_iter().next() {
+            // Alias matched — look up canonical name for the RELATE.
+            info!(alias = entity_name, entity_id = %eid, "alias-resolved entity for involves link");
+            let mut canonical_result = db
+                .query("SELECT name FROM type::record('entity', $eid) LIMIT 1")
+                .bind(("eid", eid.as_str().to_string()))
+                .await
+                .map_err(|e| KbError::db("fetching canonical name for alias-resolved entity", e))?;
+            let crows: Vec<serde_json::Value> = canonical_result.take(0).unwrap_or_default();
+            crows.into_iter()
+                .next()
+                .and_then(|r| r.get("name").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_else(|| entity_name.to_string())
+        } else {
+            // No canonical or alias match — use entity_name as-is; upsert will create it.
+            entity_name.to_string()
+        }
+    };
+
+    // Upsert entity with kind "person" (default when linking from memory people field).
+    // ON DUPLICATE KEY UPDATE ensures last_contact is kept current.
     db.query(
         "INSERT INTO entity { name: $name, kind: 'person', roles: [], attrs: { last_contact: $now_str }, context: NONE, created_at: $now, updated_at: $now } ON DUPLICATE KEY UPDATE updated_at = $now, attrs.last_contact = $now_str"
     )
-    .bind(("name", entity_name.to_string()))
+    .bind(("name", canonical_name.clone()))
     .bind(("now", now))
     .bind(("now_str", now_str))
     .await
     .map_err(|e| KbError::db("upserting entity", e))?;
 
     // v3: RELATE subject must be a proper RecordId, not type::record().
-    // IF/ELSE uses curly-brace blocks (no THEN...END).
     // Check for existing edge before RELATE — idempotent, prevents duplicates.
     let mem_rid = RecordId::new("memory", memory_id.as_str());
     let mut response = db.query(
-        "LET $ent = (SELECT * FROM entity WHERE name = $name LIMIT 1);
+        "LET $ent = (SELECT * FROM entity WHERE name = $name AND archived_at IS NONE LIMIT 1);
          LET $existing = (SELECT * FROM involves WHERE in = $mem_record AND out = $ent[0]);
          IF $ent[0] != NONE AND $existing = [] {
              RELATE $mem_record -> involves -> $ent[0]
          };"
     )
-    .bind(("name", entity_name.to_string()))
+    .bind(("name", canonical_name))
     .bind(("mem_record", mem_rid))
     .await
     .map_err(|e| KbError::db(format!("linking memory {memory_id} to entity"), e))?;
@@ -95,19 +141,54 @@ pub async fn link_entity(
 /// Link a memory to an entity via the `assigned` relation.
 /// Used for action_item subtypes — first person = assignee.
 /// Upserts the entity first to ensure it exists (mirrors link_entity behavior).
+///
+/// Like `link_entity`, resolves aliases before falling through to create a new entity.
 #[instrument(skip(db))]
 pub async fn link_assigned(
     db: &SurrealClient,
     memory_id: &MemoryId,
     entity_name: &str,
 ) -> Result<()> {
-    // Ensure entity exists (same upsert as link_entity)
     let now = chrono::Utc::now();
     let now_str = now.to_rfc3339();
+
+    // Resolve canonical name (canonical match first, then alias lookup).
+    let mut name_result = db
+        .query("SELECT name FROM entity WHERE name = $name AND archived_at IS NONE LIMIT 1")
+        .bind(("name", entity_name.to_string()))
+        .await
+        .map_err(|e| KbError::db("looking up entity for assignment", e))?;
+    let name_rows: Vec<serde_json::Value> = name_result.take(0).unwrap_or_default();
+
+    let canonical_name: String = if let Some(row) = name_rows.into_iter().next() {
+        row.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(entity_name)
+            .to_string()
+    } else {
+        let alias_ids = entity_alias::resolve(db, entity_name).await.unwrap_or_default();
+        if let Some(eid) = alias_ids.into_iter().next() {
+            info!(alias = entity_name, entity_id = %eid, "alias-resolved entity for assigned link");
+            let mut r = db
+                .query("SELECT name FROM type::record('entity', $eid) LIMIT 1")
+                .bind(("eid", eid.as_str().to_string()))
+                .await
+                .map_err(|e| KbError::db("fetching canonical name for alias-resolved entity", e))?;
+            let crows: Vec<serde_json::Value> = r.take(0).unwrap_or_default();
+            crows.into_iter()
+                .next()
+                .and_then(|r| r.get("name").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_else(|| entity_name.to_string())
+        } else {
+            entity_name.to_string()
+        }
+    };
+
+    // Ensure entity exists (same upsert as link_entity)
     db.query(
         "INSERT INTO entity { name: $name, kind: 'person', roles: [], attrs: { last_contact: $now_str }, context: NONE, created_at: $now, updated_at: $now } ON DUPLICATE KEY UPDATE updated_at = $now"
     )
-    .bind(("name", entity_name.to_string()))
+    .bind(("name", canonical_name.clone()))
     .bind(("now", now))
     .bind(("now_str", now_str))
     .await
@@ -115,13 +196,13 @@ pub async fn link_assigned(
 
     let mem_rid = RecordId::new("memory", memory_id.as_str());
     let mut response = db.query(
-        "LET $ent = (SELECT * FROM entity WHERE name = $name LIMIT 1);
+        "LET $ent = (SELECT * FROM entity WHERE name = $name AND archived_at IS NONE LIMIT 1);
          LET $existing = (SELECT * FROM assigned WHERE in = $mem_record AND out = $ent[0]);
          IF $ent[0] != NONE AND $existing = [] {
              RELATE $mem_record -> assigned -> $ent[0]
          };"
     )
-    .bind(("name", entity_name.to_string()))
+    .bind(("name", canonical_name))
     .bind(("mem_record", mem_rid))
     .await
     .map_err(|e| KbError::db(format!("assigning memory {memory_id} to entity"), e))?;

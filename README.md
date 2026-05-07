@@ -91,8 +91,8 @@ High-importance memories (`importance >= 5`) and protected subtypes (`decision`,
 | `kb_promote` | Clear TTL, bump importance |
 | `kb_link` | Create typed graph edges between memories (`updates` / `extends` / `derives` / `relates`) |
 | `kb_relation_retract` | Soft-retract an LLM-extracted typed_relation edge |
-| `kb_entity_upsert` | Create or update a flexible entity (person / company / product / concept / project) |
-| `kb_entity_find` | Search entities by name, kind, or role |
+| `kb_entity_upsert` | Create or update a flexible entity (person / company / product / concept / project); optional `aliases` param registers nicknames/alternate names |
+| `kb_entity_find` | Search entities by name, kind, or role; falls back to alias index when canonical name misses |
 | `kb_entity_get` | Full entity record + recent memories |
 | `kb_entity_delete` | Soft-archive an entity (idempotent) |
 | `kb_consolidate` | Merge memories into one (originals archived) |

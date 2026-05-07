@@ -2078,6 +2078,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdrhistogram"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
+dependencies = [
+ "byteorder",
+ "num-traits",
+]
+
+[[package]]
 name = "headers"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4864,6 +4874,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sd-notify"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e4ef7359e694bfaf1dd27a30f9d760b54c00dfae9f19bd0c05a39bc9128fe76"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5120,13 +5139,14 @@ dependencies = [
 
 [[package]]
 name = "smriti"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "config",
  "fastembed",
+ "hdrhistogram",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -5134,6 +5154,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "schemars",
+ "sd-notify",
  "serde",
  "serde_json",
  "sha2",
@@ -5144,6 +5165,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-journald",
  "tracing-subscriber",
  "uuid",
  "wiremock",
@@ -6083,6 +6105,17 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-journald"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3a81ed245bfb62592b1e2bc153e77656d94ee6a0497683a65a12ccaf2438d0"
+dependencies = [
+ "libc",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

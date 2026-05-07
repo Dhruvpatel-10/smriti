@@ -81,6 +81,7 @@ async fn remember_basic_stores_memory() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -226,6 +227,7 @@ async fn remember_supersession_archives_old_memory() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -277,6 +279,7 @@ async fn recall_empty_returns_all() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -316,6 +319,7 @@ async fn recall_filters_by_project() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -356,6 +360,7 @@ async fn recall_filters_by_domain() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -405,6 +410,7 @@ async fn recall_limit_respected() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -453,6 +459,7 @@ async fn recall_limit_capped_at_25() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -495,6 +502,7 @@ async fn recall_time_range_filter() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -541,6 +549,7 @@ async fn recall_at_filters_by_created_at() {
             channel: None,
             modality: None,
             exclude_retracted: None,
+            spreading: None,
         },
         &Default::default(),
     )
@@ -563,6 +572,7 @@ async fn recall_at_filters_by_created_at() {
             channel: None,
             modality: None,
             exclude_retracted: None,
+            spreading: None,
         },
         &Default::default(),
     )
@@ -665,6 +675,7 @@ async fn forget_archives_memory() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -877,6 +888,7 @@ async fn consolidate_merges_and_archives_originals() {
             channel: None,
             modality: None,
             rerank: None,
+            spreading: None,
         },
         &Default::default(),
         &Default::default(),
@@ -923,6 +935,7 @@ async fn entity_upsert_creates_and_retrieves() {
             roles: Some(vec!["investor".to_string()]),
             attrs: Some(serde_json::json!({"fund": "Sequoia", "check_size": "$500k"})),
             context: Some("Met at demo day".to_string()),
+            aliases: None,
         },
     )
     .await
@@ -956,6 +969,7 @@ async fn entity_upsert_is_idempotent() {
             roles: Some(vec![]),
             attrs: None,
             context: None,
+            aliases: None,
         },
     )
     .await
@@ -969,6 +983,7 @@ async fn entity_upsert_is_idempotent() {
             roles: Some(vec!["engineer".to_string()]),
             attrs: Some(serde_json::json!({"team": "backend"})),
             context: Some("Updated context".to_string()),
+            aliases: None,
         },
     )
     .await
@@ -991,17 +1006,17 @@ async fn entity_find_fuzzy_and_filtered() {
 
     entity::execute_upsert(&db, entity::EntityUpsertInput {
         name: "Alice Johnson".to_string(), kind: "person".to_string(),
-        roles: Some(vec!["engineer".to_string()]), attrs: None, context: None,
+        roles: Some(vec!["engineer".to_string()]), attrs: None, context: None, aliases: None,
     }).await.unwrap();
 
     entity::execute_upsert(&db, entity::EntityUpsertInput {
         name: "Bob Smith".to_string(), kind: "person".to_string(),
-        roles: Some(vec!["designer".to_string()]), attrs: None, context: None,
+        roles: Some(vec!["designer".to_string()]), attrs: None, context: None, aliases: None,
     }).await.unwrap();
 
     entity::execute_upsert(&db, entity::EntityUpsertInput {
         name: "Acme Corp".to_string(), kind: "company".to_string(),
-        roles: Some(vec!["customer".to_string()]), attrs: None, context: None,
+        roles: Some(vec!["customer".to_string()]), attrs: None, context: None, aliases: None,
     }).await.unwrap();
 
     // Fuzzy name
@@ -1064,17 +1079,28 @@ async fn entity_get_nonexistent_returns_error() {
 // STATUS
 // ═══════════════════════════════════════════════════════════════════════════
 
+fn status_ctx() -> status::DiagnosticsCtx<'static> {
+    static DEFAULT_SPREADING: std::sync::LazyLock<smriti::config::SpreadingConfig> =
+        std::sync::LazyLock::new(smriti::config::SpreadingConfig::default);
+    status::DiagnosticsCtx { embedder: None, sidecar: None, spreading_config: &DEFAULT_SPREADING }
+}
+
+fn status_input(project: Option<String>, domain: Option<String>) -> status::StatusInput {
+    status::StatusInput { project, domain, include_diagnostics: None }
+}
+
 #[tokio::test]
 async fn status_empty_db() {
     let (db, _dir) = test_db().await;
 
-    let report = status::execute(&db, status::StatusInput { project: None, domain: None })
+    let report = status::execute(&db, status_ctx(), status_input(None, None))
         .await
         .unwrap();
 
     assert_eq!(report.active_memories, 0);
     assert!(report.open_action_items.is_empty());
     assert!(report.recent_decisions.is_empty());
+    assert!(report.diagnostics.is_none());
 }
 
 #[tokio::test]
@@ -1093,7 +1119,7 @@ async fn status_counts_active_memories() {
         .unwrap();
     }
 
-    let report = status::execute(&db, status::StatusInput { project: None, domain: None })
+    let report = status::execute(&db, status_ctx(), status_input(None, None))
         .await
         .unwrap();
 
@@ -1108,10 +1134,11 @@ async fn status_includes_action_items() {
     input.project = Some("atlas".to_string());
     remember::execute(&db, None, None, tasks(), input).await.unwrap();
 
-    let report = status::execute(&db, status::StatusInput {
-        project: Some("atlas".to_string()),
-        domain: None,
-    }).await.unwrap();
+    let report = status::execute(
+        &db,
+        status_ctx(),
+        status_input(Some("atlas".to_string()), None),
+    ).await.unwrap();
 
     assert!(!report.open_action_items.is_empty());
     assert_eq!(report.open_action_items[0].summary, "Follow up with investor");
@@ -1128,14 +1155,45 @@ async fn status_filters_by_project() {
     remember::execute(&db, None, None, tasks(), atlas).await.unwrap();
     remember::execute(&db, None, None, tasks(), beacon).await.unwrap();
 
-    let report = status::execute(&db, status::StatusInput {
-        project: Some("atlas".to_string()),
-        domain: None,
-    }).await.unwrap();
+    let report = status::execute(
+        &db,
+        status_ctx(),
+        status_input(Some("atlas".to_string()), None),
+    ).await.unwrap();
 
     // Only atlas memory should count
     assert_eq!(report.active_memories, 1);
     assert!(report.recent_decisions.iter().all(|d| d.project.as_deref() == Some("atlas")));
+}
+
+#[tokio::test]
+async fn status_diagnostics_block_includes_version_and_db_counts() {
+    let (db, _dir) = test_db().await;
+
+    remember::execute(
+        &db,
+        None,
+        None,
+        tasks(),
+        remember_input("A fact", MemoryType::Semantic, MemorySubtype::Fact),
+    )
+    .await
+    .unwrap();
+
+    let report = status::execute(
+        &db,
+        status_ctx(),
+        status::StatusInput { project: None, domain: None, include_diagnostics: Some(true) },
+    )
+    .await
+    .unwrap();
+
+    let d = report.diagnostics.expect("diagnostics block must be present");
+    assert!(!d.version.is_empty());
+    assert_eq!(d.db.active_memories, 1);
+    // Embedder and sidecar are optional and disabled in this test fixture.
+    assert!(d.embedder.is_none());
+    assert!(d.sidecar.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

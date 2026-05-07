@@ -111,6 +111,56 @@ impl From<String> for AgentId {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RequestId newtype (ADR-028)
+//
+// Stamped at MCP tool dispatch entry; threaded through tracing spans for
+// cross-component correlation. UUIDv7 — time-ordered for log readability.
+// Background tasks spawned post-create do NOT inherit this id; they use
+// `operation_id = memory_id` for their own correlation.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RequestId(pub String);
+
+impl RequestId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+tokio::task_local! {
+    /// Per-tool-call request id, set by `server::tool_call!` and read by
+    /// downstream components (sidecar RPC, post-create extractors) to
+    /// stamp the same id into outbound payloads.
+    ///
+    /// Background tasks spawned post-create do NOT inherit this — they use
+    /// `operation_id = memory_id` (ADR-028).
+    pub static REQUEST_ID: RequestId;
+}
+
+/// Read the current task-local `RequestId`, if any. Returns `None` when called
+/// from a context that did not set it (e.g. background tasks, tests).
+pub fn current_request_id() -> Option<RequestId> {
+    REQUEST_ID.try_with(|r| r.clone()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +205,19 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let deserialized: EntityId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
+    }
+
+    #[test]
+    fn request_id_is_unique() {
+        let a = RequestId::new();
+        let b = RequestId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn request_id_display_matches_inner() {
+        let id = RequestId(String::from("test_rid"));
+        assert_eq!(format!("{id}"), "test_rid");
+        assert_eq!(id.as_str(), "test_rid");
     }
 }

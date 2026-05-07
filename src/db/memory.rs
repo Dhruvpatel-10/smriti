@@ -737,6 +737,31 @@ pub async fn set_anchors(db: &SurrealClient, id: &MemoryId, anchors: &[String]) 
     Ok(())
 }
 
+/// Merge canonical entity names into anchor_entities without overwriting
+/// names already present.
+///
+/// Used by `auto_link::match_known_entities` to replace raw extraction tokens
+/// (e.g. "Bob") with canonical entity names (e.g. "Robert Smith") when an FTS
+/// match confirms the entity exists in the DB. `array::union` is idempotent —
+/// calling multiple times with overlapping sets is safe.
+#[instrument(skip(db, anchors))]
+pub async fn merge_anchors(db: &SurrealClient, id: &MemoryId, anchors: &[String]) -> Result<()> {
+    if anchors.is_empty() {
+        return Ok(());
+    }
+    let id_rid = RecordId::new("memory", id.as_str());
+    db.query(
+        "UPDATE $id SET \
+         anchor_entities = array::union(IF anchor_entities IS NONE THEN [] ELSE anchor_entities END, $new_anchors), \
+         updated_at = time::now()",
+    )
+    .bind(("id", id_rid))
+    .bind(("new_anchors", anchors.to_vec()))
+    .await
+    .map_err(|e| KbError::db(format!("merging anchors on memory {id}"), e))?;
+    Ok(())
+}
+
 /// Promote a memory: clear expiry, bump importance to at least 3.
 ///
 /// Returns `NotFound` if the memory does not exist or is not active.

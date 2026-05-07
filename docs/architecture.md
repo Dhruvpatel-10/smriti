@@ -46,7 +46,7 @@ The server enforces data quality regardless of how smart the calling LLM is:
 - Contextual embedding: prepend `[type/subtype] [project] [domains]` before encoding
 - Auto-dedup at write time (cosine >0.92 reject, >0.82 warn)
 - Auto-link via embedding similarity (0.75 relates, 0.90 extends, 0.85 cross-domain)
-- Entity name matching via whole-word boundary scan (min 4 chars)
+- Entity name matching via whole-word boundary scan (min 4 chars); `match_known_entities` falls back to alias FTS (`idx_alias_value_ft`) when canonical FTS misses — alias-matched tokens write `involves` edges to the canonical entity
 
 **Layer 3 — LLM Background** (drain session, best-effort):
 - Reclassification of auto-classified memories (Gemini Flash primary, Groq fallback)
@@ -104,6 +104,12 @@ WHERE invalidated_at IS NONE
 ## Retrieval Pipeline (5+ stages)
 
 ```
+0.5 Alias expansion (pre-stage, ADR-030) — FTS lookup on idx_alias_value_ft against the
+   query string before BM25/vector. Any matched alias rows resolve to their canonical
+   entity IDs. Those entities are injected as implicit entity-anchor candidates for the
+   person filter and spreading activation stages even when the caller has not passed
+   person=. Closes the gap where a nickname appears in the query text but no explicit
+   person= was supplied.
 1. BM25 full-text search (always runs) — searches summary | content | anchor_entities
 2. Vector cosine similarity (if embeddings enabled, relevance floor cosine ≥ 0.30)
 3. Fusion — RRF (default, k=60) or Convex Combination (α·norm_vec + (1-α)·norm_bm25,
@@ -119,6 +125,10 @@ WHERE invalidated_at IS NONE
    Tracing emitted at `target: "rerank.decision"`. Reduces Voyage rerank API calls ~40% at
    fixed quality (calibration pending ADR-021 eval set). (ADR-017, ADR-022)
 4. Entity-anchored person filter (if person specified — start from entity edges, not post-hoc)
+   Person lookup (kb_recall person=) resolves through alias index: exact match on entity.name
+   first; on miss, FTS lookup against idx_alias_value_ft returns the canonical entity ID.
+   Multi-canonical resolution (impossible under the UNIQUE constraint, possible only via DB
+   inconsistency) WARN-logs the collision and returns all candidates.
 5. Weighted Spreading Activation (ADR-023) — 1-hop via typed edges with per-edge-type weights:
    derives=1.0, extends=0.8, updates=0.8, relates=0.5, involves=0.3,
    typed_relation=confidence×0.9. Hop decay: 0.5^hop_depth. Cap and all weights configurable
@@ -158,6 +168,15 @@ WHERE event_at      <= $as_of
 ```
 
 Before ADR-011, only `event_at <= $as_of` was checked — superseded facts were returned even when they had been invalidated before the as_of date.
+
+### Entity lookup with alias fallback (ADR-030)
+
+`kb_entity_find`, `kb_entity_get`, and the internal `get_by_name` helper all resolve through the alias index when the canonical `entity.name` does not match:
+
+- `get_by_name` — exact match: `entity.name = $v OR entity_alias.value = $v` (alias index join).
+- `kb_entity_find` — substring/FTS: searches both `entity.name` (via `idx_entity_name_ft`) and `entity_alias.value` (via `idx_alias_value_ft`); results are deduplicated to the canonical entity before return.
+
+Both paths read only non-archived aliases (`archived_at IS NONE`). The canonical entity ID is always what propagates — callers never observe alias IDs.
 
 ## Multi-Agent Design
 
@@ -266,3 +285,78 @@ Set `llm.enabled = false` in `config.toml` (default). The sidecar process is nev
 ### Embeddings
 
 Embedder backend is selected by `embeddings.provider` in `config.toml` (`local` or `voyage`). Both implement the `Embedder` trait (`src/db/embeddings/traits.rs`). Local default: fastembed ONNX, 384-dim, no network. Voyage: voyage-context-3, 1024-dim Matryoshka, `/v1/contextualizedembeddings` exclusively, paid-tier privacy gate (ADR-016). Fingerprint (`provider/model/dim`) is verified at startup against `_kb_metadata` (Migration 015) — mismatch refuses start. Set `SMRITI_FORCE_REEMBED_ON_START=1` to bypass once (run `kb_reembed` immediately after).
+
+## Observability (ADR-028)
+
+### Log format
+
+`init_tracing()` builds a layered `tracing_subscriber::registry()`. Format is selected by
+`[observability].log_format`:
+- `journald` — `tracing_journald` native layer; default when `JOURNAL_STREAM` env var is
+  set (i.e., running under systemd).
+- `json` — structured JSON to stderr.
+- `pretty` — human-readable colored output; default outside systemd.
+
+`EnvFilter` reads `RUST_LOG`; defaults to `info`. All output goes to stderr; stdout is
+reserved for the MCP protocol.
+
+### ThrottleLayer
+
+`src/observability/throttle.rs` implements a `tracing_subscriber::Layer` stacked before
+the fmt layer. It drops repeated events from the same callsite within a configurable
+window (default 500 ms). Bypass rules:
+- Target prefix in the allowlist (default: `["sidecar", "smriti::llm"]`) — always passes through.
+- Event has a field `event_class` containing `"crash"` or `"panic"` — always passes through.
+
+A `suppressed` atomic counter is exposed via `suppressed_handle()` and included in the
+`kb_status` diagnostics block.
+
+### Request ID propagation
+
+`RequestId(String)` newtype (`src/types/ids.rs`) is generated as UUIDv7 (time-ordered)
+per tool call. A `tokio::task_local! REQUEST_ID` carries it within the async scope.
+`pub fn current_request_id() -> Option<RequestId>` is the accessor.
+
+The `tool_call!` macro in `src/server.rs` wraps every handler body in:
+```
+REQUEST_ID.scope(rid, async move { ... }).instrument(span).await
+```
+Span: `mcp_tool` with fields `tool` and `request_id`. Background tasks spawned
+post-create do NOT inherit `request_id` — they use `operation_id = memory_id` for their
+own correlation (fire-and-forget; no cross-spawn propagation by design).
+
+### Sidecar RPC meta
+
+`JsonRpcRequest` in `src/llm/sidecar.rs` carries an optional `meta: Option<RpcMeta>`
+field (`skip_serializing_if = "is_none"`). `RpcMeta { request_id: String }` is populated
+from `current_request_id()` inside `call()`. Sidecar logs can correlate with server-side
+spans using the same `request_id` without a separate trace propagation layer.
+
+### Recall-stage histograms
+
+`src/db/recall_metrics.rs` maintains 5 `hdrhistogram::Histogram<u64>` instances behind
+`Mutex`, one per retrieval stage (`Bm25`, `Vector`, `Fusion`, `Rerank`,
+`SpreadingActivation`). All 5 stages in `src/db/search.rs` call `record(stage, elapsed)`
+at the end of each stage. `snapshot_and_reset()` returns `RecallStagePercentiles`
+(p50/p95/p99/max in µs per stage) and resets the histograms atomically. Called by
+`kb_status` when `include_diagnostics = true`.
+
+### kb_status diagnostics
+
+`kb_status(include_diagnostics=true)` returns an optional `DiagnosticsBlock`:
+- `version`, `uptime_secs` (from `src/observability/mod.rs` `OnceLock`)
+- `embedder`: provider, model, dimensions
+- `sidecar`: `circuit_state` (Healthy/BackingOff/Broken), `restart_count`,
+  `dropped_inflight`, `last_success_age_secs`
+- `db`: migrations applied, total/active memories, total entities, total agents
+- `recall_stage_p95`: per-stage p95 latency in µs since last reset
+
+### sd-notify + Watchdog
+
+`notify_systemd_ready(tasks)` in `src/main.rs` is called after the HTTP listener binds:
+1. Emits `READY=1` via `sd_notify` — enables `Type=notify` in the systemd unit.
+2. Reads `WatchdogUSec` from the environment; spawns a Watchdog ticker at `window/2`
+   interval that emits `WATCHDOG=1` to systemd. Ticker is registered in `TaskRegistry`
+   and cancelled on graceful shutdown.
+
+Set `WatchdogSec=30` in the systemd unit to enable liveness-based restart.

@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod llm;
+pub mod observability;
 pub mod server;
 pub mod shutdown;
 pub mod tools;

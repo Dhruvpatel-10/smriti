@@ -176,9 +176,19 @@ To switch back to local, reverse the config and repeat Steps 1–6.
 
 ---
 
+## Systemd service notes (ADR-028)
+
+smriti uses `sd_notify` and systemd Watchdog support (ADR-028):
+- The service emits `READY=1` after the HTTP listener binds (`Type=notify` in the unit).
+- If `WatchdogSec=` is set in the unit, smriti spawns a ticker at `WatchdogUSec/2` to
+  emit `WATCHDOG=1` on schedule. Missing ticks cause systemd to restart the process.
+- During a reembed (`kb_reembed`), the process remains running and Watchdog ticks
+  continue — do not stop the service mid-reembed.
+
 ## References
 
 - ADR-015: Local model selection (`docs/decisions/015-embedder-swap.md`)
 - ADR-016: Voyage AI backend + fingerprint gate policy (`docs/decisions/016-cloud-embedder-backend.md`)
+- ADR-028: Observability rollout — sd-notify, Watchdog, request_id (`docs/decisions/028-observability-rollout.md`)
 - Librarian agent: `~/.claude/agents/smriti-librarian.md`
 - Global write protocol: `~/.claude/CLAUDE.md`

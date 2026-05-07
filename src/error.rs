@@ -29,6 +29,12 @@ pub enum KbError {
     #[error("data corruption: {0}")]
     DataCorruption(String),
 
+    #[error("alias collision: alias '{value}' already belongs to entity '{existing_canonical}'")]
+    AliasCollision {
+        value: String,
+        existing_canonical: String,
+    },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -58,6 +64,9 @@ impl KbError {
             Self::Config(msg) => format!("config error: {msg}"),
             Self::Json(_) => "serialization error (check server logs)".to_string(),
             Self::Queue(msg) => format!("queue error: {msg}"),
+            Self::AliasCollision { value, existing_canonical } => {
+                format!("alias collision: '{value}' is already registered to entity '{existing_canonical}'")
+            }
         }
     }
 }

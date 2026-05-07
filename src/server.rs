@@ -13,6 +13,39 @@ use crate::db::reranker::Reranker;
 use crate::db::reranker::voyage::VoyageReranker;
 use crate::shutdown::TaskRegistry;
 use crate::tools::*;
+use crate::types::RequestId;
+
+/// Dispatch helper for MCP tool handlers (ADR-028).
+///
+/// Stamps a fresh UUIDv7 `request_id`, enters an `mcp_tool` span carrying
+/// `tool` + `request_id` fields (so child `#[instrument]` spans inherit the
+/// id automatically), and returns the standard JSON-or-error response shape.
+///
+/// `$body` must evaluate to a `Future<Output = Result<T, KbError>>` where
+/// `T: serde::Serialize`.
+macro_rules! tool_call {
+    ($tool:literal, $body:expr) => {{
+        use tracing::Instrument;
+        let rid = RequestId::new();
+        let span = tracing::info_span!("mcp_tool", tool = $tool, request_id = %rid);
+        let inner_rid = rid.clone();
+        crate::types::REQUEST_ID
+            .scope(inner_rid, async move {
+                match $body.await {
+                    Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| {
+                        serde_json::json!({"error": format!("serialization failed: {e}")})
+                            .to_string()
+                    }),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tool call failed");
+                        serde_json::json!({"error": e.client_message()}).to_string()
+                    }
+                }
+            })
+            .instrument(span)
+            .await
+    }};
+}
 
 #[derive(Clone)]
 pub struct KbServer {
@@ -144,73 +177,37 @@ impl KbServer {
     /// Store a new memory with summary, type, and metadata. Returns the memory ID.
     #[tool(name = "kb_remember", description = "Store a new memory with summary, type, and metadata")]
     async fn kb_remember(&self, params: Parameters<remember::RememberInput>) -> String {
-        match remember::execute(&self.db, self.embedding_client.clone(), self.llm_sidecar.clone(), self.tasks.clone(), params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_remember", remember::execute(&self.db, self.embedding_client.clone(), self.llm_sidecar.clone(), self.tasks.clone(), params.0))
     }
 
     /// Search memories by query, type, project, domain, person, or time range.
     #[tool(name = "kb_recall", description = "Search memories by query, type, project, domain, person, or time range. Returns summaries only.")]
     async fn kb_recall(&self, params: Parameters<recall::RecallInput>) -> String {
-        match recall::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.spreading_config, &self.fusion_config).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_recall", recall::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.spreading_config, &self.fusion_config))
     }
 
     /// Point-in-time recall: return what was active at a specific moment.
     #[tool(name = "kb_recall_at", description = "Point-in-time recall: return what was active at a specific moment in history")]
     async fn kb_recall_at(&self, params: Parameters<recall_at::RecallAtInput>) -> String {
-        match recall_at::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.fusion_config).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_recall_at", recall_at::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.fusion_config))
     }
 
     /// Fetch the full content of a single memory by ID.
     #[tool(name = "kb_drill", description = "Fetch the full content of a single memory by ID")]
     async fn kb_drill(&self, params: Parameters<drill::DrillInput>) -> String {
-        match drill::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_drill", drill::execute(&self.db, params.0))
     }
 
     /// Archive a memory (soft delete — never hard-deletes). Use reason=forget for "no longer relevant" or reason=retract for "explicitly wrong".
     #[tool(name = "kb_archive", description = "Archive a memory. reason=forget means 'no longer relevant'; reason=retract means 'I was wrong' and optionally links a correction memory via retracts edge.")]
     async fn kb_archive(&self, params: Parameters<archive::ArchiveInput>) -> String {
-        match archive::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_archive", archive::execute(&self.db, params.0))
     }
 
     /// Promote a short-term memory to long-term (clears TTL, bumps importance).
     #[tool(name = "kb_promote", description = "Promote a short-term memory to long-term (clears TTL, bumps importance)")]
     async fn kb_promote(&self, params: Parameters<promote::PromoteInput>) -> String {
-        match promote::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_promote", promote::execute(&self.db, params.0))
     }
 
     // ── Entity operations ────────────────────────────────────────────
@@ -218,61 +215,31 @@ impl KbServer {
     /// Create or update a flexible entity (person, company, concept, etc.).
     #[tool(name = "kb_entity_upsert", description = "Create or update a flexible entity (person, company, product, concept, project)")]
     async fn kb_entity_upsert(&self, params: Parameters<entity::EntityUpsertInput>) -> String {
-        match entity::execute_upsert(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_entity_upsert", entity::execute_upsert(&self.db, params.0))
     }
 
     /// Search entities by name, kind, or role.
     #[tool(name = "kb_entity_find", description = "Search entities by name, kind, or role")]
     async fn kb_entity_find(&self, params: Parameters<entity::EntityFindInput>) -> String {
-        match entity::execute_find(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_entity_find", entity::execute_find(&self.db, params.0))
     }
 
     /// Get full entity details including related memories.
     #[tool(name = "kb_entity_get", description = "Get full entity details including related memories")]
     async fn kb_entity_get(&self, params: Parameters<entity::EntityGetInput>) -> String {
-        match entity::execute_get(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_entity_get", entity::execute_get(&self.db, params.0))
     }
 
     /// Soft-retract a typed_relation edge (LLM-extracted). Edge stays in DB but is filtered from spreading activation.
     #[tool(name = "kb_relation_retract", description = "Soft-retract a typed_relation edge (LLM-extracted). Edge stays in DB but is filtered from spreading activation.")]
     async fn kb_relation_retract(&self, params: Parameters<relation_retract::RelationRetractInput>) -> String {
-        match relation_retract::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_relation_retract", relation_retract::execute(&self.db, params.0))
     }
 
     /// Soft-delete (archive) an entity. Entity stays in DB but is hidden from all read paths.
     #[tool(name = "kb_entity_delete", description = "Soft-delete (archive) an entity. Entity stays in DB but is hidden from all normal read paths. Idempotent.")]
     async fn kb_entity_delete(&self, params: Parameters<entity_delete::EntityDeleteInput>) -> String {
-        match entity_delete::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_entity_delete", entity_delete::execute(&self.db, params.0))
     }
 
     // ── Agent operations ─────────────────────────────────────────────
@@ -280,37 +247,19 @@ impl KbServer {
     /// Register a new agent (LLM author) or resurrect an archived one.
     #[tool(name = "kb_agent_register", description = "Register a new agent (LLM author) or resurrect an archived one.")]
     async fn kb_agent_register(&self, params: Parameters<agent::AgentRegisterInput>) -> String {
-        match agent::execute_register(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_agent_register", agent::execute_register(&self.db, params.0))
     }
 
     /// Retire (soft-archive) an agent by id or name. Optional purge_memories archives memories too.
     #[tool(name = "kb_agent_retire", description = "Retire (soft-archive) an agent by id or name. Optional purge_memories archives memories too.")]
     async fn kb_agent_retire(&self, params: Parameters<agent::AgentRetireInput>) -> String {
-        match agent::execute_retire(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_agent_retire", agent::execute_retire(&self.db, params.0))
     }
 
     /// Query agents. Pass id_or_name to fetch a single AgentFull; omit it to list AgentSummary records.
     #[tool(name = "kb_agent_query", description = "Query agents. With id_or_name: returns single AgentFull. Without: returns AgentSummary list, filterable by project and include_archived.")]
     async fn kb_agent_query(&self, params: Parameters<agent::AgentQueryInput>) -> String {
-        match agent::execute_query(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_agent_query", agent::execute_query(&self.db, params.0))
     }
 
     // ── Graph & organization ─────────────────────────────────────────
@@ -318,168 +267,142 @@ impl KbServer {
     /// Create a semantic link between two memories.
     #[tool(name = "kb_link", description = "Create a semantic link between two memories")]
     async fn kb_link(&self, params: Parameters<link::LinkInput>) -> String {
-        match link::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_link", link::execute(&self.db, params.0))
     }
 
     /// Merge multiple memories into one consolidated memory, archiving the originals.
     #[tool(name = "kb_consolidate", description = "Merge multiple memories into one consolidated memory, archiving the originals")]
     async fn kb_consolidate(&self, params: Parameters<consolidate::ConsolidateInput>) -> String {
-        match consolidate::execute(&self.db, self.embedding_client.clone(), params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_consolidate", consolidate::execute(&self.db, self.embedding_client.clone(), params.0))
     }
 
     /// Queue a natural language instruction for the memory session.
     #[tool(name = "kb_queue", description = "Queue a natural language instruction for the memory session to process later")]
     async fn kb_queue(&self, params: Parameters<queue::QueueInput>) -> String {
-        match queue::execute(&self.queue_dir, self.max_queue_size, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_queue", queue::execute(&self.queue_dir, self.max_queue_size, params.0))
     }
 
     // ── Status & maintenance ─────────────────────────────────────────
 
     /// Get status report: open action items, open questions, recent decisions, alerts.
-    #[tool(name = "kb_status", description = "Get status report: open action items, open questions, recent decisions, alerts")]
+    #[tool(name = "kb_status", description = "Get status report: open action items, open questions, recent decisions, alerts. Pass include_diagnostics=true to attach version/uptime/embedder/sidecar/recall percentile telemetry.")]
     async fn kb_status(&self, params: Parameters<status::StatusInput>) -> String {
-        match status::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        let ctx = status::DiagnosticsCtx {
+            embedder: self.embedding_client.as_ref(),
+            sidecar: self.llm_sidecar.as_ref(),
+            spreading_config: &self.spreading_config,
+        };
+        tool_call!("kb_status", status::execute(&self.db, ctx, params.0))
     }
 
     /// Profile snapshot: stable static facts + recent dynamic activity.
     #[tool(name = "kb_profile", description = "Profile snapshot for fast LLM-context injection: stable static facts (preferences, values, life goals) plus recent dynamic activity")]
     async fn kb_profile(&self, params: Parameters<profile::ProfileInput>) -> String {
-        match profile::execute(&self.db, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_profile", profile::execute(&self.db, params.0))
     }
 
     /// Check for overdue items, stale contacts, and expiring memories.
     #[tool(name = "kb_alerts", description = "Check for overdue items, stale contacts, expiring memories, and potential contradictions")]
     async fn kb_alerts(&self) -> String {
-        match alerts::execute(&self.db, &self.alert_config).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_alerts", alerts::execute(&self.db, &self.alert_config))
     }
 
     /// Export all memories and entities to a JSONL backup file.
     #[tool(name = "kb_export", description = "Export all memories and entities to a JSONL backup file")]
     async fn kb_export(&self, params: Parameters<export::ExportInput>) -> String {
-        match export::execute_export(
-            &self.db,
-            &self.export_dir,
-            self.export_config.exclude_sensitive,
-            params.0,
-        )
-        .await
-        {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_export", export::execute_export(&self.db, &self.export_dir, self.export_config.exclude_sensitive, params.0))
     }
 
     /// Import memories and entities from a JSONL backup file.
     #[tool(name = "kb_import", description = "Import memories and entities from a JSONL backup file")]
     async fn kb_import(&self, params: Parameters<export::ImportInput>) -> String {
-        match export::execute_import(&self.db, &self.export_dir, params.0).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        tool_call!("kb_import", export::execute_import(&self.db, &self.export_dir, params.0))
     }
 
     // ── New maintenance tools ────────────────────────────────────────
 
     /// Regenerate the CLAUDE.md markdown summary from the current knowledge base state.
     #[tool(name = "kb_regenerate_md", description = "Regenerate the CLAUDE.md markdown summary file from current KB state")]
-    #[tracing::instrument(name = "kb_regenerate_md", skip_all)]
     async fn kb_regenerate_md(&self) -> String {
+        use tracing::Instrument;
+        let rid = RequestId::new();
+        let span = tracing::info_span!("mcp_tool", tool = "kb_regenerate_md", request_id = %rid);
         let path = self.markdown_config.resolved_path();
-        match crate::db::markdown::regenerate_file(&self.db, &self.alert_config, &path).await {
-            Ok(()) => serde_json::json!({
-                "message": "CLAUDE.md regenerated",
-                "path": path.display().to_string()
+        crate::types::REQUEST_ID
+            .scope(rid, async move {
+                match crate::db::markdown::regenerate_file(&self.db, &self.alert_config, &path).await {
+                    Ok(()) => serde_json::json!({
+                        "message": "CLAUDE.md regenerated",
+                        "path": path.display().to_string()
+                    })
+                    .to_string(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tool call failed");
+                        serde_json::json!({"error": e.client_message()}).to_string()
+                    }
+                }
             })
-            .to_string(),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+            .instrument(span)
+            .await
     }
 
     /// Find clusters of related memories that are candidates for consolidation.
     #[tool(name = "kb_consolidation_candidates", description = "Find clusters of related memories that should be consolidated (merged). Returns suggestions — does not auto-merge.")]
-    #[tracing::instrument(
-        name = "kb_consolidation_candidates",
-        skip_all,
-        fields(limit = params.0.limit)
-    )]
     async fn kb_consolidation_candidates(
         &self,
         params: Parameters<ConsolidationCandidatesInput>,
     ) -> String {
+        use tracing::Instrument;
+        let rid = RequestId::new();
+        let span = tracing::info_span!(
+            "mcp_tool",
+            tool = "kb_consolidation_candidates",
+            request_id = %rid,
+            limit = params.0.limit,
+        );
         // u8 → usize is infallible: u8 max (255) always fits in usize.
         let limit = usize::from(params.0.limit.unwrap_or(10).min(50));
-        match crate::db::consolidation::find_candidates(&self.db, limit, None, None).await {
-            Ok(candidates) => serde_json::json!({
-                "candidates": candidates,
-                "count": candidates.len()
+        crate::types::REQUEST_ID
+            .scope(rid, async move {
+                match crate::db::consolidation::find_candidates(&self.db, limit, None, None).await {
+                    Ok(candidates) => serde_json::json!({
+                        "candidates": candidates,
+                        "count": candidates.len()
+                    })
+                    .to_string(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tool call failed");
+                        serde_json::json!({"error": e.client_message()}).to_string()
+                    }
+                }
             })
-            .to_string(),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+            .instrument(span)
+            .await
     }
 
     /// Re-embed all active memories with the current embedding model. Use after changing model or dimensions.
     #[tool(name = "kb_reembed", description = "Re-embed all active memories with the current embedding model. Use after changing model or dimensions in config.")]
-    #[tracing::instrument(name = "kb_reembed", skip_all)]
     async fn kb_reembed(&self) -> String {
-        let Some(ref embedder) = self.embedding_client else {
-            return r#"{"error": "embeddings are disabled in config"}"#.to_string();
-        };
-        match crate::db::reembed::reembed_all(&self.db, embedder.clone(), 50).await {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()),
-            Err(e) => {
-                tracing::warn!(error = %e, "tool call failed");
-                serde_json::json!({"error": e.client_message()}).to_string()
-            }
-        }
+        use tracing::Instrument;
+        let rid = RequestId::new();
+        let span = tracing::info_span!("mcp_tool", tool = "kb_reembed", request_id = %rid);
+        crate::types::REQUEST_ID
+            .scope(rid, async move {
+                let Some(ref embedder) = self.embedding_client else {
+                    return r#"{"error": "embeddings are disabled in config"}"#.to_string();
+                };
+                match crate::db::reembed::reembed_all(&self.db, embedder.clone(), 50).await {
+                    Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
+                        serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string()
+                    }),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tool call failed");
+                        serde_json::json!({"error": e.client_message()}).to_string()
+                    }
+                }
+            })
+            .instrument(span)
+            .await
     }
 }
 

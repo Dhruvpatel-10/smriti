@@ -35,9 +35,20 @@ type PendingMap = Arc<PlMutex<HashMap<u64, PendingSender>>>;
 #[derive(Debug, Clone)]
 enum State {
     Healthy,
-    // Reserved for future mid-backoff state visibility; set by supervisor.
+    // Fields are populated by the supervisor but currently only the variant
+    // tag is read by the public projection (`circuit_state()`). Step 5 will
+    // surface them in the kb_status diagnostics block.
     #[allow(dead_code)]
     BackingOff { until: Instant, fail_count: u32 },
+    Broken,
+}
+
+/// Public projection of [`State`] for telemetry / kb_status diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitState {
+    Healthy,
+    BackingOff,
     Broken,
 }
 
@@ -186,6 +197,18 @@ struct JsonRpcRequest<'a, T: Serialize> {
     id: u64,
     method: &'a str,
     params: T,
+    /// Out-of-band correlation envelope (ADR-028). Stamped with the per-tool
+    /// `request_id` read from the task-local when the call originates inside
+    /// a tool handler; absent when called from background tasks (which use
+    /// `operation_id = memory_id` instead). Sidecar echoes this field in
+    /// structured logs so a single request_id traces across server + sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<RpcMeta>,
+}
+
+#[derive(Serialize)]
+struct RpcMeta {
+    request_id: String,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +238,11 @@ pub struct SidecarClient {
     state: Arc<PlMutex<State>>,
     restart_count: Arc<AtomicU64>,
     dropped_inflight: Arc<AtomicU64>,
+    /// Unix-epoch millis of the most recent successful RPC reply. `0` = never.
+    /// Updated only on `Ok(_)` returns from `call()`. Used as a liveness signal
+    /// independent of `restart_count`/`dropped_inflight`, which only track
+    /// supervisor-side events.
+    last_success_at_ms: Arc<AtomicU64>,
 }
 
 impl SidecarClient {
@@ -246,6 +274,7 @@ impl SidecarClient {
         let state = Arc::new(PlMutex::new(State::Healthy));
         let restart_count = Arc::new(AtomicU64::new(0));
         let dropped_inflight = Arc::new(AtomicU64::new(0));
+        let last_success_at_ms = Arc::new(AtomicU64::new(0));
         let (tx_to_writer, rx_to_writer) = mpsc::unbounded_channel();
 
         let client = Arc::new(Self {
@@ -257,6 +286,7 @@ impl SidecarClient {
             state: state.clone(),
             restart_count: restart_count.clone(),
             dropped_inflight: dropped_inflight.clone(),
+            last_success_at_ms,
         });
 
         let handle = tokio::spawn(supervisor_loop(
@@ -329,6 +359,32 @@ impl SidecarClient {
         self.dropped_inflight.load(Ordering::Relaxed)
     }
 
+    /// Public projection of the supervisor's circuit-breaker state.
+    /// Maps `State::BackingOff` and `State::Broken` to their public equivalents.
+    pub fn circuit_state(&self) -> CircuitState {
+        match *self.state.lock() {
+            State::Healthy => CircuitState::Healthy,
+            State::BackingOff { .. } => CircuitState::BackingOff,
+            State::Broken => CircuitState::Broken,
+        }
+    }
+
+    /// Wall-clock age of the most recent successful sidecar RPC reply.
+    /// `None` until the first success — distinguishes "never alive" from
+    /// "alive a long time ago". Uses `SystemTime`, so backwards clock changes
+    /// can produce a saturated zero; acceptable for a liveness signal.
+    pub fn last_success_age(&self) -> Option<Duration> {
+        let stored = self.last_success_at_ms.load(Ordering::Relaxed);
+        if stored == 0 {
+            return None;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64;
+        Some(Duration::from_millis(now_ms.saturating_sub(stored)))
+    }
+
     async fn call<P: Serialize>(
         &self,
         method: &str,
@@ -340,7 +396,10 @@ impl SidecarClient {
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let req = JsonRpcRequest { jsonrpc: "2.0", id, method, params };
+        let meta = crate::types::current_request_id().map(|rid| RpcMeta {
+            request_id: rid.as_str().to_string(),
+        });
+        let req = JsonRpcRequest { jsonrpc: "2.0", id, method, params, meta };
         let body = serde_json::to_string(&req)?;
 
         let (tx, rx) = oneshot::channel();
@@ -354,7 +413,16 @@ impl SidecarClient {
 
         let timeout_dur = Duration::from_millis(self.config.request_timeout_ms);
         match timeout(timeout_dur, rx).await {
-            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Ok(v))) => {
+                // Record liveness only on a successful round-trip.
+                if let Ok(now) = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                {
+                    self.last_success_at_ms
+                        .store(now.as_millis() as u64, Ordering::Relaxed);
+                }
+                Ok(v)
+            }
             Ok(Ok(Err(e))) => Err(e),
             // Sender dropped because supervisor killed inflight on child death.
             Ok(Err(_)) => Err(RpcError::SidecarRestarted),
@@ -417,13 +485,24 @@ async fn supervisor_loop(
             Err(e) => {
                 error!(target: "sidecar", "spawn failed: {e}");
                 consecutive_failures += 1;
-                if consecutive_failures >= config.max_consecutive_failures {
-                    *state.lock() = State::Broken;
-                }
                 let backoff = compute_backoff(consecutive_failures);
+                {
+                    let mut s = state.lock();
+                    *s = if consecutive_failures >= config.max_consecutive_failures {
+                        State::Broken
+                    } else {
+                        State::BackingOff {
+                            until: Instant::now() + backoff,
+                            fail_count: consecutive_failures,
+                        }
+                    };
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(backoff) => {}
+                }
+                if !matches!(*state.lock(), State::Broken) {
+                    *state.lock() = State::Healthy;
                 }
                 continue;
             }
@@ -482,20 +561,38 @@ async fn supervisor_loop(
             consecutive_failures += 1;
         }
 
-        if consecutive_failures >= config.max_consecutive_failures {
-            warn!(
-                target: "sidecar",
-                consecutive_failures,
-                "circuit breaker open"
-            );
-            *state.lock() = State::Broken;
+        let backoff = compute_backoff(consecutive_failures);
+        {
+            let mut s = state.lock();
+            *s = if consecutive_failures >= config.max_consecutive_failures {
+                warn!(
+                    target: "sidecar",
+                    consecutive_failures,
+                    "circuit breaker open"
+                );
+                State::Broken
+            } else if consecutive_failures > 0 {
+                State::BackingOff {
+                    until: Instant::now() + backoff,
+                    fail_count: consecutive_failures,
+                }
+            } else {
+                State::Healthy
+            };
         }
 
-        let backoff = compute_backoff(consecutive_failures);
         warn!(target: "sidecar", "restarting in {:?}", backoff);
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(backoff) => {}
+        }
+        // Drop BackingOff once the timer elapsed; Broken stays Broken until the
+        // recovery probe at the top of the loop clears it.
+        {
+            let mut s = state.lock();
+            if matches!(*s, State::BackingOff { .. }) {
+                *s = State::Healthy;
+            }
         }
     }
 }
@@ -768,6 +865,16 @@ mod tests {
         assert!((result.confidence - 0.40).abs() < 1e-5);
         assert!(result.merged_summary.is_none());
         assert!(!result.reason.is_empty());
+    }
+
+    #[test]
+    fn circuit_state_serializes_snake_case() {
+        let healthy = serde_json::to_value(CircuitState::Healthy).unwrap();
+        let backing = serde_json::to_value(CircuitState::BackingOff).unwrap();
+        let broken = serde_json::to_value(CircuitState::Broken).unwrap();
+        assert_eq!(healthy, serde_json::json!("healthy"));
+        assert_eq!(backing, serde_json::json!("backing_off"));
+        assert_eq!(broken, serde_json::json!("broken"));
     }
 
     #[test]

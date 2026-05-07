@@ -119,6 +119,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "unique composite index on typed_relation (in, out, kind) — DB-level TOCTOU guard against duplicate extraction edges",
         up: MIGRATION_020,
     },
+    Migration {
+        version: 21,
+        description: "entity_alias relation table: per-alias bitemporal bookkeeping + DB-level UNIQUE + BM25 FTS for nickname/alias resolution (ADR-030)",
+        up: MIGRATION_021,
+    },
 ];
 
 // ── Migration SQL ────────────────────────────────────────────────────────────
@@ -480,6 +485,25 @@ const MIGRATION_020: &str = r#"
         ON TABLE typed_relation
         COLUMNS in, out, kind
         UNIQUE;
+"#;
+
+// entity_alias: regular SCHEMAFULL table (not a RELATION) with an entity_id field.
+// RELATE-based approach was rejected because SurrealDB v3 treats `none` as a reserved
+// keyword (null literal), making `RELATE entity -> entity_alias -> none` a parse error.
+// A plain table with a record-link field is equivalent for our access patterns — we never
+// traverse the graph direction from entity_alias, we always SELECT by entity_id or value.
+const MIGRATION_021: &str = r#"
+    DEFINE TABLE IF NOT EXISTS entity_alias SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS entity_id   ON entity_alias TYPE record<entity>;
+    DEFINE FIELD IF NOT EXISTS `value`     ON entity_alias TYPE string ASSERT string::len($value) >= 3;
+    DEFINE FIELD IF NOT EXISTS valid_from  ON entity_alias TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS valid_until ON entity_alias TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS added_by    ON entity_alias TYPE option<record<agent>>;
+    DEFINE FIELD IF NOT EXISTS archived_at ON entity_alias TYPE option<datetime>;
+    DEFINE INDEX IF NOT EXISTS idx_alias_value_unique ON entity_alias FIELDS `value` UNIQUE;
+    DEFINE INDEX IF NOT EXISTS idx_alias_entity_id ON entity_alias FIELDS entity_id;
+    DEFINE ANALYZER IF NOT EXISTS alias_analyzer TOKENIZERS blank FILTERS lowercase;
+    DEFINE INDEX IF NOT EXISTS idx_alias_value_ft ON entity_alias FIELDS `value` FULLTEXT ANALYZER alias_analyzer BM25;
 "#;
 
 // ── Public API ───────────────────────────────────────────────────────────────

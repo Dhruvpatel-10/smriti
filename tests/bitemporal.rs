@@ -340,7 +340,7 @@ async fn recall_excludes_retracted_memories() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     )
     .await
     .unwrap();
@@ -391,7 +391,7 @@ async fn recall_excludes_expired_working_memory() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     )
     .await
     .unwrap();
@@ -436,7 +436,7 @@ async fn recall_excludes_past_expires_at_without_prune() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     )
     .await
     .unwrap();
@@ -547,7 +547,7 @@ async fn recall_excludes_memory_past_valid_until() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
     )
     .await
     .unwrap();
