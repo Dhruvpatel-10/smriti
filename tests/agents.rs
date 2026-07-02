@@ -835,6 +835,7 @@ async fn recall_author_filter_me_excludes_agent_authored() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -909,6 +910,7 @@ async fn recall_author_filter_name_returns_only_that_agents_memories() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -980,6 +982,7 @@ async fn recall_no_author_filter_returns_both() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -1011,6 +1014,7 @@ async fn recall_author_filter_unknown_name_rejected() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )

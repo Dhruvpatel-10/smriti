@@ -59,6 +59,12 @@ strategy = "rrf"                        # "rrf" (default, k=60) | "convex_combin
 vector_weight = 0.7                     # α for convex combination; ignored when strategy = "rrf"
 min_score = 0.0                         # convex combination: drop candidates below this normalised score
 
+[search.mmr]
+enabled = true                          # default-on post-fusion diversification, stage 3.4 (ADR-031)
+lambda = 0.7                            # relevance vs diversity weight, validated to [0.0, 1.0] at startup
+                                        # 1.0 = pure relevance (no diversity); 0.0 = pure diversity
+                                        # no-op when BM25-only, ≤1 candidate, or query has no embedding
+
 [search.spreading]
 cap = 3                                 # max memories added by spreading activation (ADR-023)
 hop_decay = 0.5                         # score multiplier per hop depth (0.5^hop_depth)

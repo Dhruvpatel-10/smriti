@@ -56,6 +56,7 @@ async fn anchor_entities_found_by_bm25_recall() {
         smriti::types::RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .expect("recall");

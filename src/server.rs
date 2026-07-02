@@ -6,7 +6,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::config::{AlertConfig, AppConfig, ExportConfig, FusionConfig, MarkdownConfig, SpreadingConfig};
+use crate::config::{AlertConfig, AppConfig, ExportConfig, FusionConfig, MarkdownConfig, MmrConfig, SpreadingConfig};
 use crate::db::client::SurrealClient;
 use crate::db::embeddings::{build_embedder, Embedder};
 use crate::db::reranker::Reranker;
@@ -58,6 +58,7 @@ pub struct KbServer {
     markdown_config: MarkdownConfig,
     spreading_config: SpreadingConfig,
     fusion_config: FusionConfig,
+    mmr_config: MmrConfig,
     embedding_client: Option<Arc<dyn Embedder>>,
     reranker: Option<Arc<Reranker>>,
     llm_sidecar: Option<Arc<crate::llm::sidecar::SidecarClient>>,
@@ -161,6 +162,7 @@ impl KbServer {
             markdown_config: config.markdown.clone(),
             spreading_config: config.search.spreading.clone(),
             fusion_config: config.search.fusion.clone(),
+            mmr_config: config.search.mmr.clone(),
             embedding_client,
             reranker,
             llm_sidecar,
@@ -183,13 +185,13 @@ impl KbServer {
     /// Search memories by query, type, project, domain, person, or time range.
     #[tool(name = "kb_recall", description = "Search memories by query, type, project, domain, person, or time range. Returns summaries only.")]
     async fn kb_recall(&self, params: Parameters<recall::RecallInput>) -> String {
-        tool_call!("kb_recall", recall::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.spreading_config, &self.fusion_config))
+        tool_call!("kb_recall", recall::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.spreading_config, &self.fusion_config, &self.mmr_config))
     }
 
     /// Point-in-time recall: return what was active at a specific moment.
     #[tool(name = "kb_recall_at", description = "Point-in-time recall: return what was active at a specific moment in history")]
     async fn kb_recall_at(&self, params: Parameters<recall_at::RecallAtInput>) -> String {
-        tool_call!("kb_recall_at", recall_at::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.fusion_config))
+        tool_call!("kb_recall_at", recall_at::execute(&self.db, self.embedding_client.clone(), self.reranker.clone(), params.0, &self.fusion_config, &self.mmr_config))
     }
 
     /// Fetch the full content of a single memory by ID.

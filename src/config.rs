@@ -184,6 +184,40 @@ pub enum FusionStrategy {
     ConvexCombination,
 }
 
+/// Maximal Marginal Relevance — post-fusion diversification.
+///
+/// Penalizes near-duplicate candidates so the reranker sees a diverse pool.
+/// Especially helps aggregation/list queries where one cluster of similar
+/// memories floods top-K and squeezes out other relevant clusters.
+///
+/// score(c) = lambda * relevance(c) − (1 − lambda) * max_cos_sim(c, picked)
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MmrConfig {
+    /// Enable MMR diversification stage (ADR-031). Default true.
+    #[serde(default = "default_mmr_enabled")]
+    pub enabled: bool,
+    /// Relevance vs diversity weight. 1.0 = pure relevance (no diversity).
+    /// 0.0 = pure diversity (no relevance signal). Default 0.7 — relevance-leaning.
+    #[serde(default = "default_mmr_lambda")]
+    pub lambda: f64,
+}
+
+fn default_mmr_enabled() -> bool {
+    true
+}
+fn default_mmr_lambda() -> f64 {
+    0.7
+}
+
+impl Default for MmrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_mmr_enabled(),
+            lambda: default_mmr_lambda(),
+        }
+    }
+}
+
 /// Configuration for the fusion stage that combines BM25 and vector results.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FusionConfig {
@@ -222,6 +256,8 @@ pub struct SearchConfig {
     pub spreading: SpreadingConfig,
     #[serde(default)]
     pub fusion: FusionConfig,
+    #[serde(default)]
+    pub mmr: MmrConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,6 +623,13 @@ impl AppConfig {
         if !(0.0..=1.0).contains(&vw) {
             return Err(KbError::Config(format!(
                 "search.fusion.vector_weight must be in [0.0, 1.0], got {vw}"
+            )));
+        }
+
+        let lam = config.search.mmr.lambda;
+        if !(0.0..=1.0).contains(&lam) {
+            return Err(KbError::Config(format!(
+                "search.mmr.lambda must be in [0.0, 1.0], got {lam}"
             )));
         }
 

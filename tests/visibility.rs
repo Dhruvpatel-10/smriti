@@ -41,7 +41,7 @@ async fn private_memory_visible_within_project() {
     let results = search::recall(
         &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -70,7 +70,7 @@ async fn private_memory_hidden_without_project_filter() {
     let results = search::recall(
         &db, "", None, None, None, None, None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -99,7 +99,7 @@ async fn sensitive_memory_hidden_with_project_filter() {
     let results = search::recall(
         &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -126,7 +126,7 @@ async fn sensitive_memory_hidden_without_project_filter() {
     let results = search::recall(
         &db, "", None, None, None, None, None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -155,7 +155,7 @@ async fn standard_memory_visible_everywhere() {
     let with_project = search::recall(
         &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -165,7 +165,7 @@ async fn standard_memory_visible_everywhere() {
     let without_project = search::recall(
         &db, "", None, None, None, None, None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -451,7 +451,7 @@ async fn spreading_activation_hides_private_and_sensitive() {
     let results = search::recall(
         &db, "", None, None, None, None, None, None, None, None, None, None, 25,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -597,7 +597,7 @@ async fn sm2_review_interval_capped_at_365() {
     let _ = search::recall(
         &db, "", None, None, None, None, None, None, None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();

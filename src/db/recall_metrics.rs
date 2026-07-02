@@ -26,6 +26,7 @@ pub enum RecallStage {
     Bm25,
     Vector,
     Fusion,
+    Mmr,
     Rerank,
     SpreadingActivation,
 }
@@ -37,6 +38,7 @@ pub struct RecallStageMetrics {
     bm25: Mutex<Histogram<u64>>,
     vector: Mutex<Histogram<u64>>,
     fusion: Mutex<Histogram<u64>>,
+    mmr: Mutex<Histogram<u64>>,
     rerank: Mutex<Histogram<u64>>,
     spreading: Mutex<Histogram<u64>>,
     sa_stats: Mutex<SpreadingActivationStats>,
@@ -50,6 +52,7 @@ impl RecallStageMetrics {
             bm25: Mutex::new(h()),
             vector: Mutex::new(h()),
             fusion: Mutex::new(h()),
+            mmr: Mutex::new(h()),
             rerank: Mutex::new(h()),
             spreading: Mutex::new(h()),
             sa_stats: Mutex::new(SpreadingActivationStats::default()),
@@ -61,6 +64,7 @@ impl RecallStageMetrics {
             RecallStage::Bm25 => &self.bm25,
             RecallStage::Vector => &self.vector,
             RecallStage::Fusion => &self.fusion,
+            RecallStage::Mmr => &self.mmr,
             RecallStage::Rerank => &self.rerank,
             RecallStage::SpreadingActivation => &self.spreading,
         }
@@ -97,6 +101,7 @@ impl RecallStageMetrics {
             bm25: drain(&self.bm25),
             vector: drain(&self.vector),
             fusion: drain(&self.fusion),
+            mmr: drain(&self.mmr),
             rerank: drain(&self.rerank),
             spreading_activation: drain(&self.spreading),
             sa_stats,
@@ -128,13 +133,15 @@ pub struct StagePercentiles {
     pub max_us: u64,
 }
 
-/// Snapshot of all five stages. Field names are stable wire-format — kb_status
+/// Snapshot of all pipeline stages. Field names are stable wire-format — kb_status
 /// emits this directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct RecallStagePercentiles {
     pub bm25: StagePercentiles,
     pub vector: StagePercentiles,
     pub fusion: StagePercentiles,
+    /// MMR diversification stage (ADR-031). count=0 when MMR is disabled or skipped.
+    pub mmr: StagePercentiles,
     pub rerank: StagePercentiles,
     pub spreading_activation: StagePercentiles,
     /// Rolling aggregate of walker behavior since last kb_status snapshot.

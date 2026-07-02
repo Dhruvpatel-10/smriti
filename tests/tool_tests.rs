@@ -85,6 +85,7 @@ async fn remember_basic_stores_memory() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -231,6 +232,7 @@ async fn remember_supersession_archives_old_memory() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -283,6 +285,7 @@ async fn recall_empty_returns_all() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .expect("recall failed");
@@ -321,6 +324,7 @@ async fn recall_filters_by_project() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )
@@ -362,6 +366,7 @@ async fn recall_filters_by_domain() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )
@@ -414,6 +419,7 @@ async fn recall_limit_respected() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -463,6 +469,7 @@ async fn recall_limit_capped_at_25() {
         },
         &Default::default(),
         &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -504,6 +511,7 @@ async fn recall_time_range_filter() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )
@@ -552,6 +560,7 @@ async fn recall_at_filters_by_created_at() {
             spreading: None,
         },
         &Default::default(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -574,6 +583,7 @@ async fn recall_at_filters_by_created_at() {
             exclude_retracted: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
     )
     .await
@@ -677,6 +687,7 @@ async fn forget_archives_memory() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )
@@ -890,6 +901,7 @@ async fn consolidate_merges_and_archives_originals() {
             rerank: None,
             spreading: None,
         },
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     )

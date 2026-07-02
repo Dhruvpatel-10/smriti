@@ -116,6 +116,13 @@ WHERE invalidated_at IS NONE
    configurable via [search.fusion]). RRF: no intent-based boosting. Convex Combination:
    min-max normalisation per query; vector_weight default 0.7; min_score filter default 0.0.
    BM25 raw score surfaced as `_bm25_score` via `search::score(0)`; vector raw score as `_vscore`.
+3.4 MMR diversification (ADR-031) — post-fusion, pre-rerank. Greedy Maximal Marginal Relevance
+   reorders the fused pool: score(c) = λ·norm_relevance(c) − (1−λ)·max_cos_sim(c, picked).
+   Default-on, λ=0.7 (relevance-leaning), configurable via [search.mmr]. Penalizes near-duplicate
+   clusters so the reranker sees a diverse pool — targets aggregation/list queries where one cluster
+   floods top-K. No-op when BM25-only, ≤1 candidate, or query has no embedding; soft-fails to fusion
+   order if candidate vectors can't be fetched. Candidates without a stored vector keep fusion rank,
+   appended after the MMR-selected set. Stage latency tracked as `mmr` in kb_status recall_stage_p95.
 3.5 Adaptive Rerank (ADR-022) — `RerankerPolicy` enum: `Always | Adaptive (default) | Never`.
    `should_rerank()` applies per-query heuristics: skip if RRF top-1 dominant (rrf[0] > 2·rrf[1]),
    skip Working type, skip short query (≤3 words); force if person filter active or Semantic type
@@ -137,9 +144,9 @@ WHERE invalidated_at IS NONE
 → SM-2 schedule update for BM25 rows
 ```
 
-All five stages apply the `BITEMPORAL_ACTIVE` predicate — no ghost facts enter the pipeline regardless of stage.
+All stages apply the `BITEMPORAL_ACTIVE` predicate — no ghost facts enter the pipeline regardless of stage.
 
-The retrieval pipeline is fully config-driven: fusion strategy, reranker policy, spreading activation cap, hop decay, and all six edge-type weights are tunable without code changes. See `docs/config.md` for the `[search.*]` config blocks. Evaluation quality is tracked via the graded-relevance oracle (ADR-021): nDCG@K, MRR@K, Recall@K metrics emitted per probe and in aggregate from `bench/`.
+The retrieval pipeline is fully config-driven: fusion strategy, MMR diversification weight, reranker policy, spreading activation cap, hop decay, and all six edge-type weights are tunable without code changes. See `docs/config.md` for the `[search.*]` config blocks. Evaluation quality is tracked via the graded-relevance oracle (ADR-021): nDCG@K, MRR@K, Recall@K metrics emitted per probe and in aggregate from `bench/`.
 
 `author_filter` is an indexed field predicate applied before all stages (BM25 candidates,
 vector candidates, entity-anchored intersection, and spreading-activation sources are all

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{FusionConfig, SpreadingConfig};
+use crate::config::{FusionConfig, MmrConfig, SpreadingConfig};
 use crate::db::{agent, client::SurrealClient, embeddings::Embedder, reranker::Reranker, search};
 use crate::db::search::AuthorFilter;
 use crate::error::{KbError, Result};
@@ -76,6 +76,7 @@ pub async fn execute(
     input: RecallInput,
     spreading_cfg: &SpreadingConfig,
     fusion_cfg: &FusionConfig,
+    mmr_cfg: &MmrConfig,
 ) -> Result<RecallOutput> {
     let limit = input.limit.unwrap_or(10).min(25);
 
@@ -142,6 +143,7 @@ pub async fn execute(
         policy,
         caller_override,
         spreading_override,
+        mmr_cfg,
     )
     .await?;
 

@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use surrealdb::types::RecordId;
 use tracing::{instrument, warn};
 
-use crate::config::{FusionConfig, FusionStrategy, SpreadingConfig};
+use crate::config::{FusionConfig, FusionStrategy, MmrConfig, SpreadingConfig};
 use crate::db::client::SurrealClient;
 use crate::db::entity_alias;
 use crate::db::helpers::enum_to_value;
@@ -173,6 +173,171 @@ fn convex_fuse(
     let fused_scores: Vec<f64> = ranked.iter().map(|(s, _)| *s).collect();
     let mems: Vec<MemorySummary> = ranked.into_iter().map(|(_, m)| m).collect();
     (mems, fused_scores)
+}
+
+// ── MMR diversification ─────────────────────────────────────────────────────
+
+/// Cosine similarity between two equal-length unit (or unnormalized) vectors.
+///
+/// Returns 0.0 for empty or mismatched-length inputs — safe to call on any DB row.
+fn cosine_sim(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum();
+    let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+/// Fetch stored embedding vectors for the given memory IDs in a single round-trip.
+///
+/// IDs not found or missing a `vector` field are silently omitted — the caller
+/// treats an empty map as "no vectors available" and falls back to fusion order.
+async fn fetch_candidate_vectors(
+    db: &SurrealClient,
+    ids: &[MemoryId],
+) -> Result<HashMap<MemoryId, Vec<f32>>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let id_strings: Vec<String> = ids.iter().map(|i| i.as_str().to_string()).collect();
+    let mut res = db
+        .query("SELECT record::id(id) AS rid, vector FROM memory WHERE record::id(id) IN $ids")
+        .bind(("ids", id_strings))
+        .await
+        .map_err(|e| KbError::db("fetch_candidate_vectors", e))?;
+    let rows: Vec<serde_json::Value> = res
+        .take(0)
+        .map_err(|e| KbError::db("deserializing candidate vectors", e))?;
+
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let rid = match row.get("rid").and_then(|v| v.as_str()) {
+            Some(s) => MemoryId::from(s.to_string()),
+            None => continue,
+        };
+        let vec_val = match row.get("vector") {
+            Some(v) if !v.is_null() => v,
+            _ => continue,
+        };
+        if let Ok(v) = serde_json::from_value::<Vec<f32>>(vec_val.clone()) {
+            out.insert(rid, v);
+        }
+    }
+    Ok(out)
+}
+
+/// Greedy MMR reordering of fused candidates.
+///
+/// Returns `(memories, scores)` reordered by MMR score. All input candidates
+/// are returned (just reordered); `pool_out` caps the output length.
+///
+/// Candidates without a stored vector participate using relevance-only ordering —
+/// they are appended after the MMR-selected set, preserving their fusion rank
+/// relative to each other.
+fn mmr_diversify(
+    memories: Vec<MemorySummary>,
+    fusion_scores: Vec<f64>,
+    candidate_vectors: HashMap<MemoryId, Vec<f32>>,
+    lambda: f64,
+    pool_out: usize,
+) -> (Vec<MemorySummary>, Vec<f64>) {
+    let lambda = lambda.clamp(0.0, 1.0);
+    if memories.len() <= 1 || candidate_vectors.is_empty() {
+        return (memories, fusion_scores);
+    }
+
+    // MinMax-normalize fusion scores to [0, 1].
+    let norm_rel = min_max_normalize(fusion_scores.iter().copied());
+
+    // Partition: candidates with vectors (MMR-eligible) vs without (fallback).
+    let mut with_vec: Vec<(usize, &MemorySummary, f64)> = memories
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            if candidate_vectors.contains_key(&m.id) {
+                Some((i, m, norm_rel[i]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let without_vec: Vec<(usize, &MemorySummary, f64)> = memories
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| !candidate_vectors.contains_key(&m.id) && *i < norm_rel.len())
+        .map(|(i, m)| (i, m, norm_rel[i]))
+        .collect();
+
+    if with_vec.is_empty() {
+        // No vectors at all — return unchanged.
+        return (memories, fusion_scores);
+    }
+
+    // Greedy MMR selection from the with-vector pool.
+    let target = pool_out.min(with_vec.len());
+    let mut selected_indices: Vec<usize> = Vec::with_capacity(target);
+    // picked_vecs: cloned vecs for similarity calculation against future candidates.
+    let mut picked_vecs: Vec<Vec<f32>> = Vec::with_capacity(target);
+
+    // Track which original indices have been consumed.
+    let mut remaining: Vec<(usize, &MemorySummary, f64)> = std::mem::take(&mut with_vec);
+
+    while selected_indices.len() < target && !remaining.is_empty() {
+        let best_pos = if picked_vecs.is_empty() {
+            // First pick: highest normalized relevance.
+            remaining
+                .iter()
+                .enumerate()
+                .max_by(|(_, (_, _, ra)), (_, (_, _, rb))| {
+                    ra.partial_cmp(rb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(pos, _)| pos)
+                .unwrap_or(0)
+        } else {
+            remaining
+                .iter()
+                .enumerate()
+                .max_by(|(_, (_, m_a, rel_a)), (_, (_, m_b, rel_b))| {
+                    let va = candidate_vectors.get(&m_a.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                    let vb = candidate_vectors.get(&m_b.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                    let max_sim_a = picked_vecs.iter().map(|pv| cosine_sim(va, pv)).fold(0.0f64, f64::max);
+                    let max_sim_b = picked_vecs.iter().map(|pv| cosine_sim(vb, pv)).fold(0.0f64, f64::max);
+                    let score_a = lambda * rel_a - (1.0 - lambda) * max_sim_a;
+                    let score_b = lambda * rel_b - (1.0 - lambda) * max_sim_b;
+                    score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(pos, _)| pos)
+                .unwrap_or(0)
+        };
+
+        let (orig_i, mem, _) = remaining.remove(best_pos);
+        let vec = candidate_vectors.get(&mem.id).cloned().unwrap_or_default();
+        picked_vecs.push(vec);
+        selected_indices.push(orig_i);
+    }
+
+    // Append remaining with-vector candidates that didn't fit in the greedy selection
+    // (preserving fusion order within them).
+    for (orig_i, _, _) in &remaining {
+        selected_indices.push(*orig_i);
+    }
+
+    // Append no-vector candidates (preserving fusion order).
+    for (orig_i, _, _) in &without_vec {
+        selected_indices.push(*orig_i);
+    }
+
+    selected_indices.truncate(pool_out);
+
+    let out_memories: Vec<MemorySummary> = selected_indices.iter().map(|&i| memories[i].clone()).collect();
+    let out_scores: Vec<f64> = selected_indices.iter().map(|&i| fusion_scores[i]).collect();
+    (out_memories, out_scores)
 }
 
 // ── SM-2 spaced-repetition update ───────────────────────────────────────────
@@ -779,6 +944,7 @@ pub async fn recall(
     policy: RerankerPolicy,
     caller_override: Option<bool>,
     spreading_override: Option<bool>,
+    mmr_cfg: &MmrConfig,
 ) -> Result<Vec<MemorySummary>> {
     let fetch_limit = limit.min(50) as i64;
 
@@ -1011,6 +1177,28 @@ pub async fn recall(
         }
     };
     recall_metrics::record(RecallStage::Fusion, _fusion_started.elapsed());
+
+    // ── Step 3.4: MMR diversification (ADR-031, post-fusion) ─────────
+    // Skipped when: disabled, BM25-only path (no vectors), ≤1 candidate,
+    // or query_vector was None (no embedding signal — _vector_qv_present tracks this).
+    let mut rrf_scores = rrf_scores;
+    if mmr_cfg.enabled
+        && !vector_memories.is_empty()
+        && memories.len() > 1
+        && _vector_qv_present
+    {
+        let cand_ids: Vec<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+        let candidate_vectors = fetch_candidate_vectors(db, &cand_ids)
+            .await
+            .unwrap_or_default(); // soft-fail: empty map → MMR no-op
+        let mmr_start = Instant::now();
+        let pool_out = memories.len();
+        let (m_new, s_new) =
+            mmr_diversify(memories, rrf_scores, candidate_vectors, mmr_cfg.lambda, pool_out);
+        memories = m_new;
+        rrf_scores = s_new;
+        recall_metrics::record(RecallStage::Mmr, mmr_start.elapsed());
+    }
 
     // ── Step 3.5: Cross-encoder rerank (ADR-017, ADR-022) ────────────
     if let Some(r) = reranker
@@ -1406,6 +1594,7 @@ pub async fn recall_at(
     author_filter: &AuthorFilter,
     fusion_cfg: &FusionConfig,
     exclude_retracted: bool,
+    mmr_cfg: &MmrConfig,
 ) -> Result<Vec<MemorySummary>> {
     // recall_at is a valid-time slice: returns memories whose valid-time interval covered
     // $as_of, regardless of when they were later invalidated in transaction-time (ADR-011).
@@ -1512,6 +1701,7 @@ pub async fn recall_at(
     // recall_at is a valid-time slice; invalidated_at (transaction-time) is intentionally
     // excluded — see ADR-011 update. Mirrors the BM25 arm predicate exactly.
 
+    let _at_qv_present = query_vector.is_some();
     let (vector_memories, vec_raw_scores_at) = if let Some(qv) = query_vector {
         let visibility_filter = if project.is_some() {
             " AND visibility != 'sensitive'"
@@ -1609,6 +1799,26 @@ pub async fn recall_at(
             ),
         }
     };
+
+    // ── Step 3.4: MMR diversification (ADR-031, post-fusion) ─────────
+    let mut rrf_scores_at = rrf_scores_at;
+    if mmr_cfg.enabled
+        && !vector_memories.is_empty()
+        && memories.len() > 1
+        && _at_qv_present
+    {
+        let cand_ids: Vec<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+        let candidate_vectors = fetch_candidate_vectors(db, &cand_ids)
+            .await
+            .unwrap_or_default();
+        let mmr_start = Instant::now();
+        let pool_out = memories.len();
+        let (m_new, s_new) =
+            mmr_diversify(memories, rrf_scores_at, candidate_vectors, mmr_cfg.lambda, pool_out);
+        memories = m_new;
+        rrf_scores_at = s_new;
+        recall_metrics::record(RecallStage::Mmr, mmr_start.elapsed());
+    }
 
     // ── Step 3.5: Cross-encoder rerank (ADR-017, ADR-022) ────────────
     // recall_at uses default Adaptive policy; no caller override (deferred per ADR-022).

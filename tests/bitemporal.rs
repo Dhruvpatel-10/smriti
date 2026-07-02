@@ -340,7 +340,7 @@ async fn recall_excludes_retracted_memories() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     )
     .await
     .unwrap();
@@ -391,7 +391,7 @@ async fn recall_excludes_expired_working_memory() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     )
     .await
     .unwrap();
@@ -436,7 +436,7 @@ async fn recall_excludes_past_expires_at_without_prune() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     )
     .await
     .unwrap();
@@ -486,6 +486,7 @@ async fn recall_at_respects_expires_at_boundary() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -511,6 +512,7 @@ async fn recall_at_respects_expires_at_boundary() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -547,7 +549,7 @@ async fn recall_excludes_memory_past_valid_until() {
         None,
         None,
         10,
-        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     )
     .await
     .unwrap();
@@ -619,6 +621,7 @@ async fn recall_at_returns_superseded_fact_before_supersession() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -687,6 +690,7 @@ async fn recall_at_excludes_superseded_fact_after_supersession() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -738,6 +742,7 @@ async fn recall_at_returns_nothing_before_memory_creation() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1070,6 +1075,7 @@ async fn archive_sets_valid_until_for_bitemporal_fence() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1094,6 +1100,7 @@ async fn archive_sets_valid_until_for_bitemporal_fence() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1157,6 +1164,7 @@ async fn retract_sets_valid_until_for_bitemporal_fence() {
         &AuthorFilter::None,
         &Default::default(),
         false, // audit mode: see retracted memories
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1181,6 +1189,7 @@ async fn retract_sets_valid_until_for_bitemporal_fence() {
         &AuthorFilter::None,
         &Default::default(),
         false, // audit mode
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1205,6 +1214,7 @@ async fn retract_sets_valid_until_for_bitemporal_fence() {
         &AuthorFilter::None,
         &Default::default(),
         true, // default: hide retracted
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1346,6 +1356,7 @@ async fn consolidate_then_recall_at_surfaces_pre_merge_sources() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1374,6 +1385,7 @@ async fn consolidate_then_recall_at_surfaces_pre_merge_sources() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1455,6 +1467,7 @@ async fn recall_at_default_excludes_retracted_within_valid_window() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1519,6 +1532,7 @@ async fn recall_at_exclude_retracted_false_returns_retracted_in_valid_window() {
         &AuthorFilter::None,
         &Default::default(),
         false,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1581,6 +1595,7 @@ async fn recall_at_default_does_not_filter_superseded_memories() {
         &AuthorFilter::None,
         &Default::default(),
         true,
+        &Default::default(),
     )
     .await
     .unwrap();

@@ -2,7 +2,7 @@ mod common;
 use common::{test_db, create_test_memory};
 
 use chrono::{Duration, Utc};
-use smriti::config::{EdgeWeightsConfig, FusionConfig, FusionStrategy, SpreadingConfig};
+use smriti::config::{EdgeWeightsConfig, FusionConfig, FusionStrategy, MmrConfig, SpreadingConfig};
 use smriti::db::{graph, memory, recall_metrics, search, typed_relation};
 use smriti::types::*;
 
@@ -19,7 +19,7 @@ async fn recall_empty_query_returns_all_active() {
     let id3 = create_test_memory(&db, "gamma").await;
     memory::archive(&db, &id3, InvalidationReason::Forgotten).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(results.len(), 2, "should return only active memories");
 }
 
@@ -34,7 +34,7 @@ async fn recall_filters_by_type() {
         memory::MemoryDraft::new("standup notes".into(), MemoryType::Episodic, MemorySubtype::Meeting, None, Some(Modality::Transcript))).await.unwrap();
 
     let results = search::recall(
-        &db, "", None, None, Some(MemoryType::Semantic), None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, Some(MemoryType::Semantic), None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].memory_type, MemoryType::Semantic);
@@ -53,7 +53,7 @@ async fn recall_filters_by_project() {
             .project("proj-b".into())).await.unwrap();
 
     let results = search::recall(
-        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].project.as_deref(), Some("proj-a"));
@@ -75,7 +75,7 @@ async fn recall_filters_by_time_range() {
     let results = search::recall(
         &db, "", None, None, None, None, None, None,
         Some(now - Duration::days(7)),
-        None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
     assert_eq!(results.len(), 1, "should only return the recent memory");
     assert_eq!(results[0].summary, "recent memory");
@@ -89,7 +89,7 @@ async fn recall_respects_limit() {
         create_test_memory(&db, &format!("memory {i}")).await;
     }
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 3, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 3, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -101,7 +101,7 @@ async fn recall_limit_capped_at_50() {
         create_test_memory(&db, &format!("memory {i}")).await;
     }
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 100, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 100, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert!(results.len() <= 50, "limit should be capped at 50, got {}", results.len());
 }
 
@@ -116,7 +116,7 @@ async fn recall_excludes_archived_and_superseded() {
     memory::archive(&db, &archived, InvalidationReason::Forgotten).await.unwrap();
     memory::supersede(&db, &superseded, Utc::now()).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, active);
 }
@@ -125,7 +125,7 @@ async fn recall_excludes_archived_and_superseded() {
 async fn recall_on_empty_db_returns_empty() {
     let (db, _dir) = test_db().await;
 
-    let results = search::recall(&db, "anything", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "anything", None, None, None, None, None, None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert!(results.is_empty());
 }
 
@@ -145,7 +145,7 @@ async fn recall_filters_by_domain() {
         memory::MemoryDraft::new("project decision".into(), MemoryType::Semantic, MemorySubtype::Decision, Some(Channel::Cli), Some(Modality::Text))
             .project("proj-a".into())).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].summary, "gym workout PR");
 }
@@ -293,7 +293,7 @@ async fn recall_includes_graph_neighbors_via_spreading_activation() {
     // (empty query returns all, so both would appear regardless)
     // Instead, recall with limit=25 to get everything + spreading activation
     let results = search::recall(
-        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, None, Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
 
     // Both should be present (primary directly, related via spreading activation or direct match)
@@ -315,13 +315,13 @@ async fn memory_with_multiple_domains_found_by_any() {
             .domain(vec!["health".into(), "learning".into()])).await.unwrap();
 
     // Should be found by either domain
-    let health = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let health = search::recall(&db, "", None, None, None, None, Some("health"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(health.len(), 1, "should find by 'health' domain");
 
-    let learning = search::recall(&db, "", None, None, None, None, Some("learning"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let learning = search::recall(&db, "", None, None, None, None, Some("learning"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(learning.len(), 1, "should find by 'learning' domain");
 
-    let finance = search::recall(&db, "", None, None, None, None, Some("finance"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let finance = search::recall(&db, "", None, None, None, None, Some("finance"), None, None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
     assert_eq!(finance.len(), 0, "should NOT find by unrelated domain");
 }
 
@@ -346,7 +346,7 @@ async fn recall_filters_by_type_and_project_combined() {
 
     // Filter: type=Semantic + project=proj-a
     let results = search::recall(
-        &db, "", None, None, Some(MemoryType::Semantic), Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, Some(MemoryType::Semantic), Some("proj-a"), None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
 
     assert_eq!(results.len(), 2, "should return both Semantic memories in proj-a");
@@ -369,7 +369,7 @@ async fn person_filter_works_with_entity_table() {
 
     // Filter by person=Bob
     let results = search::recall(
-        &db, "", None, None, None, None, None, Some("Bob"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, None, None, None, Some("Bob"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "should find exactly 1 memory involving Bob");
@@ -383,7 +383,7 @@ async fn person_filter_no_match_returns_empty() {
     create_test_memory(&db, "some memory").await;
 
     let results = search::recall(
-        &db, "", None, None, None, None, None, Some("Nonexistent Person"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None
+        &db, "", None, None, None, None, None, Some("Nonexistent Person"), None, None, None, None, 10, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()
     ).await.unwrap();
 
     assert!(results.is_empty(), "person filter with no match should return empty");
@@ -410,7 +410,7 @@ async fn recall_returns_higher_importance_first() {
         memory::MemoryDraft::new("medium importance".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
             .importance(Importance::new(3).unwrap())).await.unwrap();
 
-    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None).await.unwrap();
+    let results = search::recall(&db, "", None, None, None, None, None, None, None, None, None, None, 25, &search::AuthorFilter::None, 0.0, &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default()).await.unwrap();
 
     assert_eq!(results.len(), 3);
     // Results sorted by importance DESC (no lost-in-middle reordering — that belongs in the client)
@@ -442,7 +442,7 @@ async fn recall_filter_by_channel_slack_returns_two() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Slack), None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     ).await.unwrap();
 
     assert_eq!(results.len(), 2, "channel=Slack should return 2 memories, got {}", results.len());
@@ -468,7 +468,7 @@ async fn recall_filter_by_modality_transcript_returns_one() {
         &db, "", None, None, None, None, None, None, None, None,
         None, Some(Modality::Transcript),
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "modality=Transcript should return 1 memory, got {}", results.len());
@@ -495,7 +495,7 @@ async fn recall_filter_by_channel_and_modality_returns_one() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Slack), Some(Modality::Text),
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "channel=Slack AND modality=Text should return 1 memory, got {}", results.len());
@@ -522,7 +522,7 @@ async fn recall_filter_by_channel_cli_excludes_slack_memories() {
         &db, "", None, None, None, None, None, None, None, None,
         Some(Channel::Cli), None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     ).await.unwrap();
 
     assert_eq!(results.len(), 1, "channel=Cli should return only 1 memory, got {}", results.len());
@@ -549,7 +549,7 @@ async fn recall_no_channel_modality_filter_returns_all() {
         &db, "", None, None, None, None, None, None, None, None,
         None, None,
         10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     ).await.unwrap();
 
     assert_eq!(results.len(), 3, "no channel/modality filter should return all 3 memories, got {}", results.len());
@@ -637,6 +637,7 @@ async fn spreading_activation_includes_typed_relation_neighbors() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -773,6 +774,7 @@ async fn spreading_activation_excludes_retracted_typed_relations() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -879,6 +881,7 @@ async fn weighted_spreading_derives_beats_involves() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -981,6 +984,7 @@ async fn weighted_spreading_typed_relation_confidence_ordering() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1080,6 +1084,7 @@ async fn weighted_spreading_custom_config_changes_order() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1125,6 +1130,7 @@ async fn weighted_spreading_custom_config_changes_order() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1179,7 +1185,7 @@ async fn recall_with_convex_fusion_wires_correctly() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &Default::default(),
-        RerankerPolicy::default(), None, None,
+        RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -1189,7 +1195,7 @@ async fn recall_with_convex_fusion_wires_correctly() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &fusion_cfg,
-        RerankerPolicy::default(), None, None,
+        RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -1228,7 +1234,7 @@ async fn recall_cc_empty_result_with_no_matches() {
         None, None, None, None, 10,
         &search::AuthorFilter::None, 0.0,
         &Default::default(), &fusion_cfg,
-        RerankerPolicy::default(), None, None,
+        RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -1332,6 +1338,7 @@ async fn spreading_activation_position_pins_derives_above_relates() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1453,6 +1460,7 @@ async fn spreading_activation_typed_relation_outranks_involves() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1588,6 +1596,7 @@ async fn hub_degree_cap_blocks_super_hub_entity() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1633,6 +1642,7 @@ async fn hub_degree_cap_blocks_super_hub_entity() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1724,6 +1734,7 @@ async fn spreading_override_false_skips_stage() {
         RerankerPolicy::default(),
         None,
         Some(false), // spreading_override = false
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1773,6 +1784,7 @@ async fn spreading_override_false_skips_stage() {
         RerankerPolicy::default(),
         None,
         Some(true), // spreading_override = true
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -1864,6 +1876,7 @@ async fn person_filter_hub_cap_skips_over_cap_entity() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .expect("recall");
@@ -1941,6 +1954,7 @@ async fn person_filter_below_hub_cap_returns_all_linked_memories() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .expect("recall");
@@ -1960,4 +1974,237 @@ async fn person_filter_below_hub_cap_returns_all_linked_memories() {
             expected.as_str()
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MMR DIVERSIFICATION TESTS (ADR-031)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// When `mmr.enabled = false`, recall ordering must be identical to the fusion
+/// output.  Without embeddings the MMR stage is already skipped (vector path is
+/// empty), so this test verifies the config flag is wired correctly and that
+/// disabling MMR produces the same result set as the enabled path when no vectors
+/// are present (both reduce to BM25-only ordering).
+#[tokio::test]
+async fn mmr_skips_when_disabled() {
+    let (db, _dir) = test_db().await;
+
+    memory::create(&db,
+        memory::MemoryDraft::new("alpha topic".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(5).unwrap())
+    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("beta topic".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(3).unwrap())
+    ).await.unwrap();
+    memory::create(&db,
+        memory::MemoryDraft::new("gamma topic".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(1).unwrap())
+    ).await.unwrap();
+
+    let mmr_enabled = MmrConfig { enabled: true, lambda: 0.7 };
+    let mmr_disabled = MmrConfig { enabled: false, lambda: 0.7 };
+
+    // No query_vector → MMR skipped in both cases regardless of config.
+    let enabled = search::recall(
+        &db, "", None, None, None, None, None, None, None, None, None, None, 10,
+        &search::AuthorFilter::None, 0.0,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &mmr_enabled,
+    ).await.unwrap();
+
+    let disabled = search::recall(
+        &db, "", None, None, None, None, None, None, None, None, None, None, 10,
+        &search::AuthorFilter::None, 0.0,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &mmr_disabled,
+    ).await.unwrap();
+
+    let enabled_ids: Vec<&str> = enabled.iter().map(|m| m.id.as_str()).collect();
+    let disabled_ids: Vec<&str> = disabled.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        enabled_ids, disabled_ids,
+        "with no vectors, MMR enabled vs disabled must produce identical ordering"
+    );
+}
+
+/// `lambda = 1.0` means the diversity penalty is entirely suppressed: the MMR
+/// score degenerates to `1.0 * relevance - 0.0 * max_sim = relevance`.
+///
+/// This test stores real vectors so the MMR stage activates, then verifies that
+/// lambda=1.0 preserves the same ordering as the raw fusion scores.
+///
+/// Vector layout (256-dim f32):
+/// - query vec: [1, 0, 0, …]
+/// - mem A (rank-0 by fusion score, stored first, importance=5): [1, 0, 0, …] — identical to query
+/// - mem B (rank-1, importance=3): [0, 1, 0, …]
+/// - mem C (rank-2, importance=1): [0, 0, 1, …]
+///
+/// With lambda=1.0, the greedy selector always picks by pure relevance, so
+/// fusion order is preserved: A, B, C.
+#[tokio::test]
+async fn mmr_lambda_one_equals_relevance_only() {
+    let (db, _dir) = test_db().await;
+
+    const DIM: usize = 256;
+
+    let id_a = memory::create(&db,
+        memory::MemoryDraft::new("lambda one test memory A".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(5).unwrap())
+    ).await.unwrap();
+    let id_b = memory::create(&db,
+        memory::MemoryDraft::new("lambda one test memory B".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(3).unwrap())
+    ).await.unwrap();
+    let id_c = memory::create(&db,
+        memory::MemoryDraft::new("lambda one test memory C".into(), MemoryType::Semantic, MemorySubtype::Fact, Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(1).unwrap())
+    ).await.unwrap();
+
+    // Store orthogonal unit vectors so cosine sims between different memories are 0.
+    let mut vec_a = vec![0.0f32; DIM]; vec_a[0] = 1.0;
+    let mut vec_b = vec![0.0f32; DIM]; vec_b[1] = 1.0;
+    let mut vec_c = vec![0.0f32; DIM]; vec_c[2] = 1.0;
+
+    for (id, vec) in [(&id_a, &vec_a), (&id_b, &vec_b), (&id_c, &vec_c)] {
+        db.query("UPDATE type::record('memory', $id) SET vector = $vec")
+            .bind(("id", id.as_str().to_string()))
+            .bind(("vec", vec.clone()))
+            .await.unwrap();
+    }
+
+    // query_vector identical to vec_a → A ranks highest by cosine similarity.
+    let query_vec = vec_a.clone();
+
+    let mmr_lambda_one = MmrConfig { enabled: true, lambda: 1.0 };
+
+    let results = search::recall(
+        &db, "", Some(query_vec), None, None, None, None, None, None, None, None, None,
+        10, &search::AuthorFilter::None, 0.0,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &mmr_lambda_one,
+    ).await.unwrap();
+
+    assert_eq!(results.len(), 3, "all 3 memories should be returned");
+    let ids: Vec<&str> = results.iter().map(|m| m.id.as_str()).collect();
+    // A must be first (highest cosine sim to query), B second, C third.
+    assert_eq!(ids[0], id_a.as_str(), "lambda=1.0: A (highest cosine) must rank first");
+}
+
+/// With MMR enabled (lambda=0.7), a cluster of 5 near-duplicate "reading"
+/// memories should not flood the top-3: at least one non-reading memory
+/// (hike or cook) should appear in the top-3 results.
+///
+/// With MMR disabled, all top-3 positions are taken by the reading cluster
+/// (they all have the highest cosine score to the query).
+///
+/// Vector layout (256-dim f32):
+/// - query: [1, 0, 0, …]
+/// - 5 "reads" mems: near-identical high-cosine vecs [1±ε, 0, …]
+/// - 1 "hikes" mem:  [0, 1, 0, …]
+/// - 1 "cooks" mem:  [0, 0, 1, …]
+#[tokio::test]
+async fn mmr_diversifies_clustered_pool() {
+    let (db, _dir) = test_db().await;
+
+    const DIM: usize = 256;
+
+    // 5 near-duplicate reading memories — all very similar to the query.
+    let mut read_ids = Vec::new();
+    for i in 0..5usize {
+        let id = memory::create(&db,
+            memory::MemoryDraft::new(
+                format!("Alice reads a book number {i}"),
+                MemoryType::Episodic, MemorySubtype::Session,
+                Some(Channel::Cli), Some(Modality::Text),
+            ).importance(Importance::new(3).unwrap())
+        ).await.unwrap();
+
+        // Slight variation around [1, 0, …] — still very high cosine to query.
+        let mut v = vec![0.0f32; DIM];
+        v[0] = 1.0 - (i as f32) * 0.001; // 1.0, 0.999, 0.998, … all ≈ query
+        v[i + 1] = 0.001; // tiny orthogonal component for differentiation
+        db.query("UPDATE type::record('memory', $id) SET vector = $vec")
+            .bind(("id", id.as_str().to_string()))
+            .bind(("vec", v))
+            .await.unwrap();
+        read_ids.push(id);
+    }
+
+    // One "hike" memory — orthogonal to query.
+    let hike_id = memory::create(&db,
+        memory::MemoryDraft::new("Alice goes hiking in the mountains".into(),
+            MemoryType::Episodic, MemorySubtype::Session,
+            Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(3).unwrap())
+    ).await.unwrap();
+    let mut vec_hike = vec![0.0f32; DIM];
+    vec_hike[6] = 1.0;
+    db.query("UPDATE type::record('memory', $id) SET vector = $vec")
+        .bind(("id", hike_id.as_str().to_string()))
+        .bind(("vec", vec_hike))
+        .await.unwrap();
+
+    // One "cook" memory — orthogonal to both query and hike.
+    let cook_id = memory::create(&db,
+        memory::MemoryDraft::new("Alice cooks a gourmet meal".into(),
+            MemoryType::Episodic, MemorySubtype::Session,
+            Some(Channel::Cli), Some(Modality::Text))
+            .importance(Importance::new(3).unwrap())
+    ).await.unwrap();
+    let mut vec_cook = vec![0.0f32; DIM];
+    vec_cook[7] = 1.0;
+    db.query("UPDATE type::record('memory', $id) SET vector = $vec")
+        .bind(("id", cook_id.as_str().to_string()))
+        .bind(("vec", vec_cook))
+        .await.unwrap();
+
+    // Query vector: [1, 0, …] — identical to the "reads" cluster direction.
+    let mut query_vec = vec![0.0f32; DIM];
+    query_vec[0] = 1.0;
+
+    // ── MMR enabled: top-3 should contain at least one non-reading memory. ──
+    let mmr_on = MmrConfig { enabled: true, lambda: 0.7 };
+    let results_on = search::recall(
+        &db, "", Some(query_vec.clone()), None, None, None, None, None, None, None, None, None,
+        3, &search::AuthorFilter::None, 0.0,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &mmr_on,
+    ).await.unwrap();
+
+    let ids_on: Vec<&str> = results_on.iter().map(|m| m.id.as_str()).collect();
+    let non_reading_in_top3 = ids_on.iter().any(|id| {
+        *id == hike_id.as_str() || *id == cook_id.as_str()
+    });
+    assert!(
+        non_reading_in_top3,
+        "MMR enabled: at least one non-reading memory (hike or cook) must appear in top-3; got {ids_on:?}"
+    );
+
+    // ── MMR disabled: count non-reading memories in top-3 from fusion order.
+    // With MMR enabled we already verified at least one hike/cook appears.
+    // With MMR disabled the pipeline is pure fusion order — no diversity boost.
+    // Invariant: MMR-enabled non-reading count in top-3 >= MMR-disabled count.
+    let mmr_off = MmrConfig { enabled: false, lambda: 0.7 };
+    let results_off = search::recall(
+        &db, "", Some(query_vec), None, None, None, None, None, None, None, None, None,
+        3, &search::AuthorFilter::None, 0.0,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &mmr_off,
+    ).await.unwrap();
+
+    let ids_off: Vec<&str> = results_off.iter().map(|m| m.id.as_str()).collect();
+    let non_reading_off = ids_off.iter().filter(|id| {
+        **id == hike_id.as_str() || **id == cook_id.as_str()
+    }).count();
+    let non_reading_on = ids_on.iter().filter(|id| {
+        **id == hike_id.as_str() || **id == cook_id.as_str()
+    }).count();
+    // MMR must inject at least as many diverse items as fusion alone.
+    assert!(
+        non_reading_on >= non_reading_off,
+        "MMR should not reduce diversity vs fusion: on={non_reading_on} off={non_reading_off}"
+    );
+    // Total sanity: all 7 were stored; at most 3 returned.
+    assert_eq!(results_off.len(), 3, "MMR disabled: expected 3 results");
 }

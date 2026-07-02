@@ -417,6 +417,7 @@ async fn recall_person_filter_canonical_name_works() {
         RerankerPolicy::default(),
         None,
         None,
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -881,7 +882,7 @@ async fn recall_person_filter_alias_resolves_to_canonical() {
     let results = search::recall(
         &db, "roadmap", None, None, None, None, None, Some("bob"),
         None, None, None, None, 10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -919,7 +920,7 @@ async fn recall_person_filter_archived_alias_misses() {
     let results = search::recall(
         &db, "roadmap", None, None, None, None, None, Some("bob"),
         None, None, None, None, 10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();
@@ -957,7 +958,7 @@ async fn recall_freetext_alias_preexpansion_surfaces_entity_memories() {
     let results = search::recall(
         &db, "bobby", None, None, None, None, None, None,
         None, None, None, None, 10, &search::AuthorFilter::None, 0.0,
-        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None,
+        &Default::default(), &Default::default(), RerankerPolicy::default(), None, None, &Default::default(),
     )
     .await
     .unwrap();

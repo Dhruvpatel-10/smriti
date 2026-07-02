@@ -3,7 +3,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::FusionConfig;
+use crate::config::{FusionConfig, MmrConfig};
 use crate::db::{agent, client::SurrealClient, embeddings::Embedder, reranker::Reranker, search};
 use crate::db::search::AuthorFilter;
 use crate::error::{KbError, Result};
@@ -59,6 +59,7 @@ pub async fn execute(
     reranker: Option<Arc<Reranker>>,
     input: RecallAtInput,
     fusion_cfg: &FusionConfig,
+    mmr_cfg: &MmrConfig,
 ) -> Result<RecallAtOutput> {
     let limit = input.limit.unwrap_or(10).min(50);
 
@@ -109,6 +110,7 @@ pub async fn execute(
         &resolved_author,
         fusion_cfg,
         exclude_retracted,
+        mmr_cfg,
     )
     .await?;
 

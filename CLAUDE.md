@@ -85,7 +85,7 @@ Archive/supersede/retract paths set `invalidated_at` + `invalidation_reason` + `
 
 ## Retrieval (5+ stages)
 
-BM25 → Vector → Fusion (RRF default | Convex Combination, configurable) → Adaptive Rerank (ADR-022 policy, optional caller override) → Entity-anchored person filter → Weighted Spreading Activation (per-edge-type, ADR-023, configurable cap)
+BM25 → Vector → Fusion (RRF default | Convex Combination, configurable) → MMR diversification (ADR-031, default-on λ=0.7, configurable) → Adaptive Rerank (ADR-022 policy, optional caller override) → Entity-anchored person filter → Weighted Spreading Activation (per-edge-type, ADR-023, configurable cap)
 
 ---
 
