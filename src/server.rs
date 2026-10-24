@@ -158,7 +158,7 @@ impl KbServer {
     // ── Core memory operations ───────────────────────────────────────
 
     /// Store a new memory with summary, type, and metadata. Returns the memory ID.
-    #[tool(name = "kb_remember", description = "Store a new memory with summary, type, and metadata")]
+    #[tool(name = "kb_remember", description = "Store a new memory. Only summary is required; type/subtype are optional hints (default semantic/fact). Raw input goes in content and is never rewritten")]
     async fn kb_remember(&self, params: Parameters<remember::RememberInput>) -> String {
         tool_call!("kb_remember", remember::execute(&self.db, self.embedding_client.clone(), self.llm_sidecar.clone(), self.tasks.clone(), params.0))
     }

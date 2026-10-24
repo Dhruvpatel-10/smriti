@@ -57,8 +57,8 @@ pub fn remember_input(
     };
     remember::RememberInput {
         summary: padded,
-        memory_type: typ,
-        subtype: sub,
+        memory_type: Some(typ),
+        subtype: Some(sub),
         channel: Some(Channel::Cli),
         modality: Some(Modality::Text),
         content: None,

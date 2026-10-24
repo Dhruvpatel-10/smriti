@@ -159,8 +159,8 @@ fn remember_input(conv: &str, t: &Turn) -> remember::RememberInput {
     let summary = if line.chars().count() < 10 { format!("{line} (said in conversation)") } else { truncate_chars(&line, 500) };
     remember::RememberInput {
         summary,
-        memory_type: MemoryType::Episodic,
-        subtype: MemorySubtype::Conversation,
+        memory_type: Some(MemoryType::Episodic),
+        subtype: Some(MemorySubtype::Conversation),
         channel: None,
         modality: Some(Modality::Text),
         content: (line.chars().count() > 500).then_some(line),

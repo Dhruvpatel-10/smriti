@@ -43,8 +43,8 @@ fn remember_input_agent(
     };
     remember::RememberInput {
         summary: padded,
-        memory_type: typ,
-        subtype: sub,
+        memory_type: Some(typ),
+        subtype: Some(sub),
         channel: Some(Channel::Cli),
         modality: Some(Modality::Text),
         content: None,

@@ -22,10 +22,14 @@ use crate::types::*;
 pub fn build_embed_text(input: &RememberInput) -> String {
     let domain = input.domain.as_deref().unwrap_or(&[]);
     let people = input.people.as_deref().unwrap_or(&[]);
+    // An invalid pairing is rejected later in execute_inner; embed with the defaults meanwhile.
+    let (memory_type, subtype) = input
+        .taxonomy()
+        .unwrap_or((MemoryType::Semantic, MemorySubtype::Fact));
     let contextual = validation::contextual_text(
         &input.summary,
-        input.memory_type,
-        input.subtype,
+        memory_type,
+        subtype,
         input.project.as_deref(),
         domain,
         people,
@@ -35,15 +39,32 @@ pub fn build_embed_text(input: &RememberInput) -> String {
     validation::with_content_prefix(contextual, input.content.as_deref())
 }
 
+impl RememberInput {
+    /// Resolve the optional type/subtype hints into a valid pair.
+    pub fn taxonomy(&self) -> Result<(MemoryType, MemorySubtype)> {
+        match (self.memory_type, self.subtype) {
+            (Some(t), Some(s)) if s.valid_for(t) => Ok((t, s)),
+            (Some(t), Some(s)) => Err(crate::error::KbError::InvalidInput(format!(
+                "subtype {s} is not valid for type {t}"
+            ))),
+            (None, Some(s)) => Ok((s.memory_type(), s)),
+            (Some(t), None) => Ok((t, MemorySubtype::default_for(t))),
+            (None, None) => Ok((MemoryType::Semantic, MemorySubtype::Fact)),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RememberInput {
     /// 50-100 token summary of the memory (REQUIRED)
     pub summary: String,
-    /// Memory type category (REQUIRED)
-    #[serde(rename = "type")]
-    pub memory_type: MemoryType,
-    /// Memory subtype — must be valid for the given type (REQUIRED)
-    pub subtype: MemorySubtype,
+    /// Memory type hint (optional). Omitted: derived from `subtype`, else semantic.
+    #[serde(rename = "type", default)]
+    pub memory_type: Option<MemoryType>,
+    /// Memory subtype hint (optional; must match `type` when both are given).
+    /// Omitted: the type's default subtype (semantic → fact).
+    #[serde(default)]
+    pub subtype: Option<MemorySubtype>,
     /// Where bytes came from (slack, email, web, ...)
     pub channel: Option<Channel>,
     /// What shape they were in (text, transcript, document, code, ...)
@@ -193,13 +214,7 @@ async fn execute_inner(
     validation::validate_summary(&input.summary)?;
     validation::validate_content(input.content.as_deref())?;
 
-    let memory_type = input.memory_type;
-    let subtype = input.subtype;
-    if !subtype.valid_for(memory_type) {
-        return Err(crate::error::KbError::InvalidInput(format!(
-            "subtype {subtype} is not valid for type {memory_type}"
-        )));
-    }
+    let (memory_type, subtype) = input.taxonomy()?;
 
     let raw_importance = match input.importance {
         Some(v) => Importance::new(v)

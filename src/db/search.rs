@@ -801,7 +801,7 @@ async fn spreading_activation(
         AuthorFilter::Agent(_) => " AND author = $neighbor_author_id",
     };
     let neighbor_sql = format!(
-        "SELECT * FROM memory
+        "SELECT * OMIT vector FROM memory
          WHERE {BITEMPORAL_ACTIVE}
            {visibility_clause}
            {project_clause}
@@ -1013,14 +1013,14 @@ pub async fn recall(
 
     let bm25_sql = if query.trim().is_empty() {
         format!(
-            "SELECT *, 0.0 AS _bm25_score FROM memory
+            "SELECT *, 0.0 AS _bm25_score OMIT vector FROM memory
              WHERE {where_clause}
              ORDER BY importance DESC, event_at DESC
              LIMIT $limit"
         )
     } else {
         format!(
-            "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score FROM memory
+            "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score OMIT vector FROM memory
              WHERE ({where_clause})
                AND (summary @0@ $query OR content @1@ $query OR anchor_entities @2@ $query)
              ORDER BY _bm25_score DESC, importance DESC
@@ -1086,7 +1086,7 @@ pub async fn recall(
             AuthorFilter::Agent(_) => " AND author = $vec_author_id",
         };
         let vector_sql = format!(
-            "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore FROM memory
+            "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore OMIT vector FROM memory
              WHERE {BITEMPORAL_ACTIVE} AND vector != NONE{visibility_filter}{type_filter}{project_filter}{domain_filter}{since_filter}{until_filter}{channel_filter}{modality_filter}{author_filter_str}
              ORDER BY _vscore DESC
              LIMIT $limit",
@@ -1426,7 +1426,7 @@ pub async fn recall(
                     AuthorFilter::Agent(_) => "AND author = $entity_author_id",
                 };
                 let sql = format!(
-                    "SELECT * FROM memory
+                    "SELECT * OMIT vector FROM memory
                      WHERE {BITEMPORAL_ACTIVE} {visibility_filter}
                        {entity_author_clause}
                        AND record::id(id) IN $ids
@@ -1515,7 +1515,7 @@ pub async fn recall(
 
                     if !alias_mem_ids.is_empty() {
                         let aa_sql2 = format!(
-                            "SELECT * FROM memory
+                            "SELECT * OMIT vector FROM memory
                              WHERE {BITEMPORAL_ACTIVE} {visibility_clause} {proj_clause} {author_clause_aa}
                                AND record::id(id) IN $alias_mem_ids
                              ORDER BY importance DESC, event_at DESC LIMIT $aa_lim"
@@ -1678,14 +1678,14 @@ pub async fn recall_at(
 
     let bm25_sql = if query.trim().is_empty() {
         format!(
-            "SELECT *, 0.0 AS _bm25_score FROM memory
+            "SELECT *, 0.0 AS _bm25_score OMIT vector FROM memory
              WHERE {where_clause}
              ORDER BY importance DESC, event_at DESC
              LIMIT $limit"
         )
     } else {
         format!(
-            "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score FROM memory
+            "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score OMIT vector FROM memory
              WHERE ({where_clause})
                AND (summary @0@ $query OR content @1@ $query OR anchor_entities @2@ $query)
              ORDER BY _bm25_score DESC, importance DESC
@@ -1744,7 +1744,7 @@ pub async fn recall_at(
             ""
         };
         let vector_sql = format!(
-            "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore FROM memory
+            "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore OMIT vector FROM memory
              WHERE created_at <= $as_of
                AND (event_at IS NONE OR event_at <= $as_of)
                AND (valid_until IS NONE OR valid_until > $as_of)
@@ -1901,7 +1901,7 @@ pub async fn status_query(
 
     // ── action items ────────────────────────────────────────────────────────
     let action_sql = format!(
-        "SELECT * FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
+        "SELECT * OMIT vector FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
          AND memory_type = $memory_type AND subtype = $subtype\
          {project_filter}{domain_filter} \
          ORDER BY importance DESC, event_at DESC LIMIT 10"
@@ -1919,7 +1919,7 @@ pub async fn status_query(
 
     // ── open questions ──────────────────────────────────────────────────────
     let questions_sql = format!(
-        "SELECT * FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
+        "SELECT * OMIT vector FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
          AND memory_type = $memory_type AND subtype = $subtype\
          {project_filter}{domain_filter} \
          ORDER BY importance DESC LIMIT 10"
@@ -1937,7 +1937,7 @@ pub async fn status_query(
 
     // ── recent decisions ────────────────────────────────────────────────────
     let decisions_sql = format!(
-        "SELECT * FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
+        "SELECT * OMIT vector FROM memory WHERE {BITEMPORAL_ACTIVE} {visibility_filter} \
          AND memory_type = $memory_type AND subtype = $subtype\
          {project_filter}{domain_filter} \
          ORDER BY updated_at DESC LIMIT 10"

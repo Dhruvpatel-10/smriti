@@ -19,8 +19,8 @@ fn remember_input(summary: &str, typ: MemoryType, sub: MemorySubtype) -> remembe
     };
     remember::RememberInput {
         summary: padded,
-        memory_type: typ,
-        subtype: sub,
+        memory_type: Some(typ),
+        subtype: Some(sub),
         channel: Some(Channel::Cli),
         modality: Some(Modality::Text),
         content: None,
@@ -44,6 +44,38 @@ fn tasks() -> Arc<TaskRegistry> {
 // ═══════════════════════════════════════════════════════════════════════════
 // REMEMBER
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// type/subtype are optional hints: both omitted → semantic/fact; subtype only →
+/// its parent type; type only → that type's default subtype; mismatch → rejected.
+#[tokio::test]
+async fn remember_taxonomy_hints_are_optional() {
+    let (db, _dir) = test_db().await;
+    let store = |t: Option<MemoryType>, s: Option<MemorySubtype>, summary: &str| {
+        let mut input = remember_input(summary, MemoryType::Semantic, MemorySubtype::Fact);
+        input.memory_type = t;
+        input.subtype = s;
+        remember::execute(&db, None, None, tasks(), input)
+    };
+    let typed = |id: String| {
+        let db = db.clone();
+        async move {
+            let m = smriti::db::memory::get(&db, &MemoryId::from(id)).await.unwrap();
+            (m.memory_type, m.subtype)
+        }
+    };
+
+    let out = store(None, None, "no hints at all for this memory").await.unwrap();
+    assert_eq!(typed(out.id).await, (MemoryType::Semantic, MemorySubtype::Fact));
+
+    let out = store(None, Some(MemorySubtype::Meeting), "subtype only, meeting hint").await.unwrap();
+    assert_eq!(typed(out.id).await, (MemoryType::Episodic, MemorySubtype::Meeting));
+
+    let out = store(Some(MemoryType::Procedural), None, "type only, procedural hint").await.unwrap();
+    assert_eq!(typed(out.id).await, (MemoryType::Procedural, MemorySubtype::Workflow));
+
+    let err = store(Some(MemoryType::Working), Some(MemorySubtype::Decision), "mismatched hint pair").await;
+    assert!(err.is_err(), "decision is not a working subtype");
+}
 
 #[tokio::test]
 async fn remember_basic_stores_memory() {
@@ -100,8 +132,8 @@ async fn remember_with_full_fields() {
 
     let input = remember::RememberInput {
         summary: "Completed sprint planning".to_string(),
-        memory_type: MemoryType::Episodic,
-        subtype: MemorySubtype::Meeting,
+        memory_type: Some(MemoryType::Episodic),
+        subtype: Some(MemorySubtype::Meeting),
         channel: Some(Channel::Cli),
         modality: Some(Modality::Text),
         content: Some("Full transcript here".to_string()),

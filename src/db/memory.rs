@@ -527,7 +527,7 @@ pub async fn get_for_drill(
     let mut result = if let Some(p) = project {
         db.query(format!(
             "UPDATE type::record('memory', $id)
-             SET access_count += 1, updated_at = time::now()
+             SET access_count += 1
              WHERE {BITEMPORAL_ACTIVE} AND (visibility != 'sensitive' OR project = $project)
              RETURN AFTER"
         ))
@@ -538,7 +538,7 @@ pub async fn get_for_drill(
     } else {
         db.query(format!(
             "UPDATE type::record('memory', $id)
-             SET access_count += 1, updated_at = time::now()
+             SET access_count += 1
              WHERE {BITEMPORAL_ACTIVE} AND visibility != 'sensitive'
              RETURN AFTER"
         ))
@@ -566,7 +566,7 @@ pub async fn get_and_touch(db: &SurrealClient, id: &MemoryId) -> Result<Memory> 
     let mut result = db
         .query(format!(
             "UPDATE type::record('memory', $id)
-             SET access_count += 1, updated_at = time::now()
+             SET access_count += 1
              WHERE {BITEMPORAL_ACTIVE}
              RETURN AFTER"
         ))

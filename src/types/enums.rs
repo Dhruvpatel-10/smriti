@@ -136,6 +136,31 @@ impl MemorySubtype {
         Self::all_for(ty).contains(&self)
     }
 
+    /// The type this subtype belongs to (every subtype has exactly one).
+    pub fn memory_type(self) -> MemoryType {
+        [
+            MemoryType::Episodic,
+            MemoryType::Semantic,
+            MemoryType::Procedural,
+            MemoryType::Prospective,
+            MemoryType::Working,
+        ]
+        .into_iter()
+        .find(|t| self.valid_for(*t))
+        .unwrap_or(MemoryType::Semantic)
+    }
+
+    /// Subtype used when a caller gives only the type.
+    pub fn default_for(ty: MemoryType) -> Self {
+        match ty {
+            MemoryType::Episodic => Self::Conversation,
+            MemoryType::Semantic => Self::Fact,
+            MemoryType::Procedural => Self::Workflow,
+            MemoryType::Prospective => Self::ActionItem,
+            MemoryType::Working => Self::Scratch,
+        }
+    }
+
     /// Returns true for subtypes that are immune to SM-2 decay regardless of
     /// importance. Kept here so rename refactors catch every reference.
     pub fn is_immune(self) -> bool {
