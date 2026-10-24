@@ -278,7 +278,7 @@ async fn migration_021_is_idempotent_on_double_run() {
         .and_then(|v| v.get("n").and_then(|n| n.as_u64()))
         .unwrap_or(0);
     assert_eq!(
-        count, 21,
+        count, 22,
         "double migration run should not duplicate migration records"
     );
 }

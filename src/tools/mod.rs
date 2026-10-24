@@ -6,6 +6,7 @@ pub mod drill;
 pub mod entity;
 pub mod entity_delete;
 pub mod export;
+pub mod feedback;
 pub mod link;
 pub mod profile;
 pub mod promote;

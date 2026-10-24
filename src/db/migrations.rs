@@ -124,6 +124,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "entity_alias relation table: per-alias bitemporal bookkeeping + DB-level UNIQUE + BM25 FTS for nickname/alias resolution (ADR-030)",
         up: MIGRATION_021,
     },
+    Migration {
+        version: 22,
+        description: "feedback loop (B3): recall_event + feedback_event append-only logs, memory.salience prior",
+        up: MIGRATION_022,
+    },
 ];
 
 // ── Migration SQL ────────────────────────────────────────────────────────────
@@ -504,6 +509,31 @@ const MIGRATION_021: &str = r#"
     DEFINE INDEX IF NOT EXISTS idx_alias_entity_id ON entity_alias FIELDS entity_id;
     DEFINE ANALYZER IF NOT EXISTS alias_analyzer TOKENIZERS blank FILTERS lowercase;
     DEFINE INDEX IF NOT EXISTS idx_alias_value_ft ON entity_alias FIELDS `value` FULLTEXT ANALYZER alias_analyzer BM25;
+"#;
+
+// B3 feedback loop. Both event tables are append-only and carry ids only —
+// never query or memory text (privacy). `salience` is a decayed running sum of
+// feedback, used only as an optional ranking prior; it never gates or archives.
+const MIGRATION_022: &str = r#"
+    DEFINE TABLE IF NOT EXISTS recall_event SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS trace_id        ON recall_event TYPE string;
+    DEFINE FIELD IF NOT EXISTS at              ON recall_event TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS actor           ON recall_event TYPE option<record<agent>>;
+    DEFINE FIELD IF NOT EXISTS memory_ids      ON recall_event TYPE array<string>;
+    DEFINE FIELD IF NOT EXISTS tokens_returned ON recall_event TYPE int;
+    DEFINE INDEX IF NOT EXISTS idx_recall_event_trace ON recall_event FIELDS trace_id UNIQUE;
+    DEFINE INDEX IF NOT EXISTS idx_recall_event_at    ON recall_event FIELDS at;
+
+    DEFINE TABLE IF NOT EXISTS feedback_event SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS trace_id  ON feedback_event TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS memory_id ON feedback_event TYPE string;
+    DEFINE FIELD IF NOT EXISTS signal    ON feedback_event TYPE string;
+    DEFINE FIELD IF NOT EXISTS at        ON feedback_event TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS actor     ON feedback_event TYPE option<record<agent>>;
+    DEFINE INDEX IF NOT EXISTS idx_feedback_memory ON feedback_event FIELDS memory_id;
+
+    DEFINE FIELD IF NOT EXISTS salience    ON memory TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS salience_at ON memory TYPE option<datetime>;
 "#;
 
 // ── Public API ───────────────────────────────────────────────────────────────

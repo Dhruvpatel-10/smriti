@@ -23,10 +23,10 @@ async fn migrations_are_recorded_and_idempotent() {
 
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
-        "all twenty-one migrations should be recorded"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+        "all twenty-two migrations should be recorded"
     );
-    assert_eq!(migrations::latest_version(), 21);
+    assert_eq!(migrations::latest_version(), 22);
 }
 
 /// Verify that migration 17 created memory_analyzer_v2 and re-bound the three

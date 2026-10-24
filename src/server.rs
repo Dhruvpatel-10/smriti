@@ -188,6 +188,12 @@ impl KbServer {
         tool_call!("kb_archive", archive::execute(&self.db, params.0))
     }
 
+    /// Report how recalled memories were used; the only input that adapts ranking.
+    #[tool(name = "kb_feedback", description = "Report how recalled memories were used. signal: used | irrelevant | wrong | pin | unpin. With trace_id (from kb_recall) the ids must be from that recall. Never archives anything; wrong tags the memory 'disputed'")]
+    async fn kb_feedback(&self, params: Parameters<feedback::FeedbackInput>) -> String {
+        tool_call!("kb_feedback", feedback::execute(&self.db, params.0))
+    }
+
     /// Promote a short-term memory to long-term (clears TTL, bumps importance).
     #[tool(name = "kb_promote", description = "Promote a short-term memory to long-term (clears TTL, bumps importance)")]
     async fn kb_promote(&self, params: Parameters<promote::PromoteInput>) -> String {

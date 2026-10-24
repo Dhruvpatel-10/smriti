@@ -53,6 +53,8 @@ pub struct RecallInput {
 pub struct RecallOutput {
     pub memories: Vec<MemorySummary>,
     pub count: usize,
+    /// Pass to kb_feedback to report which results were used.
+    pub trace_id: String,
 }
 
 #[tracing::instrument(
@@ -148,5 +150,6 @@ pub async fn execute(
     .await?;
 
     let count = memories.len();
-    Ok(RecallOutput { memories, count })
+    let trace_id = crate::tools::feedback::record_recall(db, &memories).await;
+    Ok(RecallOutput { memories, count, trace_id })
 }

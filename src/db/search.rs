@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use surrealdb::types::RecordId;
 use tracing::{instrument, warn};
 
@@ -38,11 +38,6 @@ pub enum AuthorFilter {
 /// RRF constant k — controls how much rank matters vs. flat contribution.
 /// k=60 is the standard from Cormack et al. (2009).
 const RRF_K: f64 = 60.0;
-
-/// SM-2 interval ceiling in days. Caps the scheduled review delay at one year — both
-/// a product decision (no memory should drift beyond annual review) and protection
-/// against f64→i64 overflow on long-lived items before the cast.
-const MAX_INTERVAL_DAYS: f64 = 365.0;
 
 fn rrf_score(rank: usize) -> f64 {
     1.0 / (RRF_K + rank as f64 + 1.0)
@@ -340,78 +335,46 @@ fn mmr_diversify(
     (out_memories, out_scores)
 }
 
-// ── SM-2 spaced-repetition update ───────────────────────────────────────────
+// ── Feedback salience prior (B3) ────────────────────────────────────────────
 
-/// Compute SM-2 schedule updates from raw DB rows and fire them off
-/// asynchronously. This runs in a background task so recall latency is
-/// not affected.
-fn spawn_sm2_access_update(db: SurrealClient, rows: &[serde_json::Value]) {
-    let updates: Vec<Sm2Update> = rows.iter().filter_map(compute_sm2).collect();
-    if updates.is_empty() {
-        return;
+/// Add `weight · tanh(salience)` to each fused score and re-sort. Salience comes
+/// from kb_feedback; a no-op when the weight is 0 (the default) or on lookup error.
+async fn apply_salience_prior(
+    db: &SurrealClient,
+    memories: Vec<MemorySummary>,
+    scores: Vec<f64>,
+    weight: f64,
+) -> (Vec<MemorySummary>, Vec<f64>) {
+    if weight == 0.0 || memories.is_empty() {
+        return (memories, scores);
     }
-
-    tokio::spawn(async move {
-        // Single round-trip: FOR loop with parameterized bind avoids N+1 and
-        // satisfies the no-string-interpolation invariant.
-        // serde_json::Value implements SurrealValue so it can cross the bind boundary.
-        let updates_json = match serde_json::to_value(&updates) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("SM-2 serialization failed: {e}");
-                return;
-            }
-        };
-        let sql = "FOR $u IN $updates {
-            UPDATE type::record('memory', $u.id)
-            SET ease_factor     = $u.ease_factor,
-                review_interval = $u.review_interval,
-                next_review_at  = <datetime>$u.next_review_at;
-        };";
-        if let Err(e) = db.query(sql).bind(("updates", updates_json)).await {
-            tracing::warn!("SM-2 batch update failed: {e}");
+    let ids: Vec<String> = memories.iter().map(|m| m.id.as_str().to_string()).collect();
+    let rows: Vec<serde_json::Value> = match db
+        .query("SELECT record::id(id) AS rid, salience ?? 0.0 AS s FROM memory WHERE record::id(id) IN $ids")
+        .bind(("ids", ids))
+        .await
+        .and_then(|mut r| r.take(0))
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("salience lookup failed, keeping fusion order: {e}");
+            return (memories, scores);
         }
-    });
-}
-
-#[derive(serde::Serialize)]
-struct Sm2Update {
-    id: String,
-    ease_factor: f64,
-    review_interval: i64,
-    next_review_at: DateTime<Utc>,
-}
-
-fn compute_sm2(row: &serde_json::Value) -> Option<Sm2Update> {
-    let id = extract_id_from_row(row);
-    if id.is_empty() {
-        return None;
-    }
-
-    let ef = row
-        .get("ease_factor")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(2.5);
-    let ri = row
-        .get("review_interval")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1);
-
-    // SM-2: successful recall → grow interval, increase ease slightly.
-    // Cap at MAX_INTERVAL_DAYS before cast to prevent f64→i64 overflow UB on
-    // long-lived memories with many review cycles.
-    let new_ri = ((ri as f64) * ef)
-        .ceil()
-        .clamp(1.0, MAX_INTERVAL_DAYS) as i64;
-    let new_ef = (ef + 0.1).min(4.0);
-    let next_review = Utc::now() + Duration::days(new_ri);
-
-    Some(Sm2Update {
-        id,
-        ease_factor: new_ef,
-        review_interval: new_ri,
-        next_review_at: next_review,
-    })
+    };
+    let salience: HashMap<String, f64> = rows
+        .iter()
+        .filter_map(|r| Some((r.get("rid")?.as_str()?.to_string(), r.get("s")?.as_f64()?)))
+        .collect();
+    let mut paired: Vec<(MemorySummary, f64)> = memories
+        .into_iter()
+        .zip(scores)
+        .map(|(m, sc)| {
+            let boost = weight * salience.get(m.id.as_str()).copied().unwrap_or(0.0).tanh();
+            (m, sc + boost)
+        })
+        .collect();
+    paired.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    paired.into_iter().unzip()
 }
 
 // ── Spreading Activation ────────────────────────────────────────────────────
@@ -1167,7 +1130,7 @@ pub async fn recall(
     };
     // Fusion keeps the whole pool; results are cut to `primary_cap` after rerank.
     let fused_cap = pool.max(primary_cap);
-    let (mut memories, rrf_scores) = if vector_memories.is_empty() {
+    let (memories, rrf_scores) = if vector_memories.is_empty() {
         // No vector signal — RRF score for a single source at rank r is 1/(K+r+1).
         // Apply min_score gate manually so callers see consistent semantics
         // whether or not the embedding path was available.
@@ -1195,6 +1158,10 @@ pub async fn recall(
         }
     };
     recall_metrics::record(RecallStage::Fusion, _fusion_started.elapsed());
+
+    // ── Step 3.2: Feedback salience prior (B3, default weight 0) ─────
+    let (mut memories, rrf_scores) =
+        apply_salience_prior(db, memories, rrf_scores, fusion_cfg.salience_weight).await;
 
     // ── Step 3.4: MMR diversification (ADR-031, post-fusion) ─────────
     // Skipped when: disabled, BM25-only path (no vectors), ≤1 candidate,
@@ -1584,13 +1551,6 @@ pub async fn recall(
         }
         recall_metrics::record(RecallStage::SpreadingActivation, _spread_started.elapsed());
     }
-
-    // ── Step 6: SM-2 schedule update (fire-and-forget) ───────────────────
-    // Only BM25 intent-matched rows advance spaced-repetition intervals.
-    // Appearing in a result list (vector/spreading-activation) does not count
-    // as an explicit read; access_count is bumped only by get_for_drill /
-    // get_and_touch (explicit user-intent paths).
-    spawn_sm2_access_update(db.clone(), &bm25_rows);
 
     Ok(memories)
 }

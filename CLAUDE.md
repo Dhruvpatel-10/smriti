@@ -9,7 +9,7 @@ Local default; opt-in cloud embedder (Voyage AI, paid-tier privacy gate) for asy
 
 ## Taxonomy (5 types, 23 subtypes)
 
-Type + subtype REQUIRED in `kb_remember` — caller classify. Server validates pairing.
+Type + subtype are OPTIONAL hints in `kb_remember` (subtype-only → its parent type; type-only → default subtype; none → semantic/fact). Server validates a given pairing.
 
 ```
 episodic (6):   meeting, conversation, daily_log, reflection, session, research
@@ -27,13 +27,16 @@ Ceilings: scratch≤2, daily_log≤2.
 ## MCP Tool Signatures
 
 ```
-kb_remember(summary, type, subtype, channel?, modality?, content?, project?, domain?,
+kb_remember(summary, type?, subtype?, channel?, modality?, content?, project?, domain?,
             people?, importance?, visibility?, event_at?, tags?, updates_id?,
             source_agent?, is_static?) -> {id, message}
             // source_agent must match a registered active agent name — archived agents rejected
             // agent-authored working-subtype memories default to visibility=Private
 
-kb_recall(query, type?, project?, domain?, person?, since?, until?, author_filter?, limit?, rerank?) -> [{id, summary, ...}]
+kb_recall(query, type?, project?, domain?, person?, since?, until?, author_filter?, limit?, rerank?) -> {memories, count, trace_id}
+kb_feedback(trace_id?, memory_ids, signal) -> {message, applied}
+            // signal: used|irrelevant|wrong|pin|unpin. With trace_id, ids must come from that recall.
+            // used/irrelevant move the decayed `salience` prior; wrong tags `disputed`; never archives
 kb_recall_at(query, as_of, project?, domain?, author_filter?, limit?) -> [{id, summary, ...}]
 kb_drill(id) -> full memory + provenance
 kb_archive(id, reason, correction_id?) -> {message}
@@ -98,6 +101,8 @@ BM25 → Vector → Fusion (RRF default | Convex Combination, configurable) → 
 - All SurrealQL uses parameterized bindings — no string interpolation
 - Visibility enforced in ALL query paths
 - Never log memory content (privacy) — only IDs + types
+- Never forget by disuse — prune only archives on explicit `expires_at`/TTL; no importance decay (SM-2 removed). Usage signals live in `recall_event`/`feedback_event` + `salience`
+- Write dedup rejects only an exact restatement; similar writes are stored and flagged
 - Never hard-delete — archived memories stay in DB, `BITEMPORAL_ACTIVE` predicate (`invalidated_at IS NONE AND (valid_until IS NONE OR valid_until > time::now())`) filters reads; `status='archived'` kept as derived index hint
 - `InvalidationReason` enum — never raw strings in Rust; DB stores as lowercase snake_case
 - Single TTL source: `validation::ttl_duration()` (not memory.rs)

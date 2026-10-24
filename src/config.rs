@@ -246,6 +246,11 @@ pub struct FusionConfig {
     /// `max(limit, pool_size)`, capped at 200. Default 50.
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
+    /// Weight of the feedback salience prior added to fused scores (RRF units:
+    /// one rank step at the top is ~0.0003). Default 0.0 — off until the bench
+    /// shows feedback improves ranking.
+    #[serde(default)]
+    pub salience_weight: f64,
 }
 
 fn default_vector_weight() -> f64 {
@@ -262,6 +267,7 @@ impl Default for FusionConfig {
             vector_weight: default_vector_weight(),
             min_score: 0.0,
             pool_size: default_pool_size(),
+            salience_weight: 0.0,
         }
     }
 }
