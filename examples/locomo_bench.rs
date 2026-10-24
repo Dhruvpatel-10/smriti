@@ -233,6 +233,7 @@ async fn run(
     let db = client::connect(dir.path()).await?;
     if let Some(e) = &embedder {
         smriti::db::embeddings::fingerprint::check_or_initialize(&db, &e.fingerprint()).await?;
+        smriti::db::vector_index::ensure(&db, e.dimensions()).await;
     }
     let tasks = Arc::new(TaskRegistry::new());
 

@@ -1085,9 +1085,11 @@ pub async fn recall(
             AuthorFilter::UserOnly => " AND author IS NONE",
             AuthorFilter::Agent(_) => " AND author = $vec_author_id",
         };
+        // Over-fetch: KNN candidates are filtered by the predicates below afterwards.
+        let knn = crate::db::vector_index::candidate_predicate(fetch_limit as usize * 4);
         let vector_sql = format!(
             "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore OMIT vector FROM memory
-             WHERE {BITEMPORAL_ACTIVE} AND vector != NONE{visibility_filter}{type_filter}{project_filter}{domain_filter}{since_filter}{until_filter}{channel_filter}{modality_filter}{author_filter_str}
+             WHERE {BITEMPORAL_ACTIVE} AND {knn}{visibility_filter}{type_filter}{project_filter}{domain_filter}{since_filter}{until_filter}{channel_filter}{modality_filter}{author_filter_str}
              ORDER BY _vscore DESC
              LIMIT $limit",
             type_filter = if memory_type.is_some() { " AND memory_type = $memory_type" } else { "" },
@@ -1743,13 +1745,14 @@ pub async fn recall_at(
         } else {
             ""
         };
+        let knn = crate::db::vector_index::candidate_predicate(fetch_limit as usize * 4);
         let vector_sql = format!(
             "SELECT *, vector::similarity::cosine(vector, $qv) AS _vscore OMIT vector FROM memory
              WHERE created_at <= $as_of
                AND (event_at IS NONE OR event_at <= $as_of)
                AND (valid_until IS NONE OR valid_until > $as_of)
                AND (expires_at IS NONE OR expires_at > $as_of)
-               AND vector != NONE{visibility_filter}{project_filter}{domain_filter}{channel_filter}{modality_filter}{author_filter_str}{retracted_filter_str}
+               AND {knn}{visibility_filter}{project_filter}{domain_filter}{channel_filter}{modality_filter}{author_filter_str}{retracted_filter_str}
              ORDER BY _vscore DESC
              LIMIT $limit",
             project_filter = if project.is_some() { " AND project = $project" } else { "" },

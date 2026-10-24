@@ -103,6 +103,7 @@ impl KbServer {
         if let Some(ref e) = embedding_client {
             let fp = e.fingerprint();
             crate::db::embeddings::fingerprint::check_or_initialize(&db, &fp).await?;
+            crate::db::vector_index::ensure(&db, e.dimensions()).await;
         }
 
         let reranker = build_reranker(&embedding_client, &config.embeddings)?;

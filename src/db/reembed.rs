@@ -51,6 +51,10 @@ pub async fn reembed_all(
 
     let supports_batched = embedder.max_chunks_per_doc() > 1;
 
+    // The HNSW index is pinned to one dimension; drop it while vectors are
+    // rewritten (possibly in a new dimension) and rebuild it at the end.
+    crate::db::vector_index::remove(db).await;
+
     loop {
         // SELECT fields:
         //   is_chunk: true when this memory has ≥1 OUTBOUND `extends` edge
@@ -237,6 +241,7 @@ pub async fn reembed_all(
 
     let total = updated + failed;
     info!(total, updated, failed, "reembed complete");
+    crate::db::vector_index::ensure(db, embedder.dimensions()).await;
 
     Ok(ReembedResult {
         updated,

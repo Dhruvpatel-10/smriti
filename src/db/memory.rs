@@ -321,13 +321,14 @@ pub async fn create_with_dedup_atomic(
 
     // Build the author-scoped dedup SELECT. Two branches to avoid binding NONE
     // as an author_id (SurrealDB serialises Option::None differently per context).
+    let knn = crate::db::vector_index::candidate_predicate(8);
     let (dedup_sql, needs_author_bind) = if author.is_some() {
         (
             format!(
                 "LET $dup = (SELECT record::id(id) AS mem_id, summary, content, event_at, \
                     vector::similarity::cosine(vector, $qv) AS score \
                     FROM memory \
-                    WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author = $author_id \
+                    WHERE {BITEMPORAL_ACTIVE} AND {knn} AND author = $author_id \
                     ORDER BY score DESC LIMIT 1);\n"
             ),
             true,
@@ -338,7 +339,7 @@ pub async fn create_with_dedup_atomic(
                 "LET $dup = (SELECT record::id(id) AS mem_id, summary, content, event_at, \
                     vector::similarity::cosine(vector, $qv) AS score \
                     FROM memory \
-                    WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author IS NONE \
+                    WHERE {BITEMPORAL_ACTIVE} AND {knn} AND author IS NONE \
                     ORDER BY score DESC LIMIT 1);\n"
             ),
             false,

@@ -51,11 +51,12 @@ pub async fn check_duplicate(
     if dedup_disabled() {
         return Ok(DedupResult::Clean);
     }
+    let knn = crate::db::vector_index::candidate_predicate(8);
     let mut result = db
         .query(format!(
             "SELECT record::id(id) AS mem_id, vector::similarity::cosine(vector, $qv) AS score
              FROM memory
-             WHERE {BITEMPORAL_ACTIVE} AND vector != NONE
+             WHERE {BITEMPORAL_ACTIVE} AND {knn}
              ORDER BY score DESC
              LIMIT 1"
         ))
@@ -109,13 +110,14 @@ pub async fn check_duplicate_scoped(
     if dedup_disabled() {
         return Ok(DedupResult::Clean);
     }
+    let knn = crate::db::vector_index::candidate_predicate(8);
     let rows = if let Some(agent_id) = author {
         let rid = RecordId::new("agent", agent_id.as_str());
         let mut result = db
             .query(format!(
                 "SELECT record::id(id) AS mem_id, vector::similarity::cosine(vector, $qv) AS score
                  FROM memory
-                 WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author = $author_id
+                 WHERE {BITEMPORAL_ACTIVE} AND {knn} AND author = $author_id
                  ORDER BY score DESC
                  LIMIT 1"
             ))
@@ -132,7 +134,7 @@ pub async fn check_duplicate_scoped(
             .query(format!(
                 "SELECT record::id(id) AS mem_id, vector::similarity::cosine(vector, $qv) AS score
                  FROM memory
-                 WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author IS NONE
+                 WHERE {BITEMPORAL_ACTIVE} AND {knn} AND author IS NONE
                  ORDER BY score DESC
                  LIMIT 1"
             ))
@@ -181,6 +183,7 @@ pub async fn find_similar(
     limit: usize,
 ) -> Result<Vec<(String, f64, Option<String>)>> {
     let limit_i64 = limit as i64;
+    let knn = crate::db::vector_index::candidate_predicate(limit * 2 + 8);
 
     let mut result = db
         .query(format!(
@@ -189,7 +192,7 @@ pub async fn find_similar(
                     vector::similarity::cosine(vector, $qv) AS score
              FROM memory
              WHERE {BITEMPORAL_ACTIVE}
-               AND vector != NONE
+               AND {knn}
                AND record::id(id) != $exclude
              ORDER BY score DESC
              LIMIT $limit"

@@ -23,6 +23,7 @@ pub mod reranker;
 pub mod search;
 pub mod typed_relation;
 pub mod validation;
+pub mod vector_index;
 
 /// Bitemporal predicate for "currently valid" memories — replaces `status = 'active'`
 /// in all READ query paths.
