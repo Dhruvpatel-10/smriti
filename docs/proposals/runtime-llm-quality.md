@@ -14,7 +14,7 @@ Retrieval is the bottleneck. It has two separate faults: gold evidence never ent
 | D4 | Ranking failure | Recall@10 is 50% but Recall@1 is 12.2%. `should_rerank` ends in `matches!(Semantic)` (`:908`), so episodic, procedural and prospective queries of 4–6 words are never reranked. MMR reorders a list that is already truncated (`:1195`), so it cannot recover anything. It shipped unmeasured. |
 | D5 | Typed relations are broken by design | The sidecar prompt contains no candidate memory IDs (`sidecar/src/index.ts:148-154,215-245`), so `to` cannot resolve. The confidence gate (`extractor.rs:64`) uses the model's own self-reported confidence. In practice, almost no edges get persisted. |
 | D6 | `recall_at` is weaker than `recall` | It has no person filter, alias expansion or spreading activation (`:1583-1847`). Temporal LoCoMo questions take this weaker path. |
-| D7 | Privacy bug | `execute()` embeds through Voyage (`remember.rs:109-112`) before visibility is resolved (`:230-240`). `Sensitive` memories leave the machine today. |
+| D7 | ~~Privacy bug~~ Owner decision (2026-10-24) | `execute()` embeds before visibility is resolved. The owner runs Smriti locally and treats `Sensitive` like any other memory, so this is accepted and not a bug. The opposite problem is real: `Sensitive` memories are skipped by relation/anchor extraction and consolidation, so they get lower-quality indexing. |
 | D8 | Measurement is broken | `bench/` is absent from this checkout. The synthetic oracle is broken. STATUS.md shows samples=1 and n=196 QAs, so the 95% CI on a 50% recall is about ±7 pts. Every gain the teams proposed is inside that noise. Production telemetry measures latency only. |
 | D9 | The tier tables assume a model setting that doesn't exist | The sidecar model is hardcoded to `claude-sonnet-4-5` (`index.ts:234,302,377`). |
 | D10 | Dead code and blind defaults | `domain_decay_rate` (`prune.rs:21`) is never called. Importance, `is_static`, visibility and dedup are all fixed tables or a single global float threshold. |
@@ -27,7 +27,7 @@ Retrieval is the bottleneck. It has two separate faults: gold evidence never ent
                        WRITE (kb_remember)
 caller ─► agent resolve ─► validate ─► VISIBILITY RESOLVE ─► [W0 PII screen: warn+tag]
                                               │
-                         Sensitive? ──yes──► local-only path (no Voyage, no Jev, no sidecar)
+                         (all visibilities go through the full pipeline — owner decision)
                                               │ no
                         embed_document(summary + content prefix)   ◄─ D3 fix
                                               │
@@ -66,7 +66,7 @@ co-retrieval log ─(hourly)─► [D Jev relation Choice] ─► add-only edges
 **Invariants:**
 
 - Judges and generators only return `JudgeOutcome::{CreateEdge, RaiseAlert, Tag, SkipMerge, AllowMerge}`. There is no Archive or Retract variant, so they can never destroy memory, and the compiler enforces it.
-- `JudgeState` construction rejects `Sensitive` input when the judge's egress is Remote.
+- Visibility is enforced on reads only; it does not gate the embedder, judges or sidecar (owner decision).
 - Generated `search_keys` are used only for indexing. They are never returned as memory text and never fed into dedup.
 - If any judge is disabled, times out or trips its breaker, Smriti behaves exactly as it does today.
 
@@ -112,7 +112,7 @@ Each step ships behind its own config flag. A step that fails its gate is switch
 |---|---|---|---|
 | P0.1 Restore `bench/`, fix the oracle, add stage-wise gold tracking (BM25@N, vector@N, post-fusion, post-rerank, top-k) | `bench/`, `recall_metrics.rs` quality counter | Baseline reproduces within ±1 pt over 3 runs on the full set | n/a |
 | P0.2 Turn MMR off (`[mmr].enabled=false`), using the escape ADR-031 already provides | config | none needed | config |
-| P0.3 Reorder `execute()` so visibility is resolved before embedding; `Sensitive` gets a local-embedder vector or none | `remember.rs:100-124` | Test: no remote embed call for `Sensitive` | none (privacy fix) |
+| P0.3 Remove the `Visibility::Sensitive` skip from relation/anchor extraction and consolidation, so Sensitive memories get the same enrichment | `src/llm/extractor.rs`, `remember.rs` post-create, consolidation `fetch_source_metadata` | Tests updated; Sensitive memories gain typed edges/anchors | none needed |
 | P0.4 Sidecar model config (`[sidecar].relation_model`, `consolidation_model`, `enrich_model`) | `sidecar/src/index.ts:234,302,377`, `config.rs` | Tests green | defaults to current |
 | P0.5 `[search].pool_size=150` replaces the `min(50)` cap | `search.rs:949,1649` | Recall@10 +3 pts, p95 +≤50 ms | `pool_size=50` |
 | P0.6 Remove the `primary_cap` reservation; spreading neighbours compete in the pool | `search.rs:1147-1179,1439,1452` | Recall@10 no regression, Recall@1 up | `[spreading].reserve_slots=3` |
@@ -149,7 +149,7 @@ P0.5–P0.8 are measured one at a time. P0.8 may close most of the Recall@10 gap
 - **Procedural distillation** (ReasoningBank-style): Jev gate, then Sonnet, then a Jev gate. Gate: the distilled pattern or workflow is retrieved for ≥30% of matching probes.
 - **Importance and `is_static` judge (W2), decay guard.** Wire or delete `domain_decay_rate`. Delete it unless the bench shows a decay effect.
 - **Haiku multi-hop decomposition.** Only if R1 shows multi-hop is still the weak subset.
-- **`LocalJudge` (Laya)** as the exit from the vendor and the only judge allowed to see `Sensitive`. Gate: ECE <0.10, since the base model reportedly needs fine-tuning.
+- **`LocalJudge` (Laya)** as the exit from the vendor (cost/availability hedge). Gate: ECE <0.10, since the base model reportedly needs fine-tuning.
 - **`auto_supersede`.** Requires 4 weeks of P2.3 ledger data at ≥0.95 precision, the same author, and an alert on every use.
 
 ## 5. Eval fixes required before any gate means anything
@@ -192,7 +192,7 @@ P0.5–P0.8 are measured one at a time. P0.8 may close most of the Recall@10 gap
 | Judges that archive, retract or lower visibility | Memory-poisoning defence (arXiv 2605.08442). |
 | Judge state built from summaries only | Fidelity loss. The real limit is 32 KB, so state uses a 600-char content prefix. |
 | Per-recall reconsolidation spawns | DB write amplification on SurrealKV. Use the hourly batch instead. |
-| PII screen auto-upgrading to Sensitive | Regex precision is too low and would silently remove memories from pipelines. It warns and tags instead. |
+| PII screen auto-upgrading visibility | Regex precision is too low and would silently remove memories from pipelines. It warns and tags instead. |
 | Jev Box, `-latest` alias | Early or unstable features. |
 | Gates on the 196-QA set | Inside the noise floor. |
 | Keeping MMR λ=0.7 while it is unmeasured | It cannot recover truncated items and may displace the top hit. |
