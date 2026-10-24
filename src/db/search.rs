@@ -1022,8 +1022,8 @@ pub async fn recall(
         format!(
             "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score FROM memory
              WHERE ({where_clause})
-               AND (summary @@ $query OR content @@ $query OR anchor_entities @@ $query)
-             ORDER BY importance DESC, event_at DESC
+               AND (summary @0@ $query OR content @1@ $query OR anchor_entities @2@ $query)
+             ORDER BY _bm25_score DESC, importance DESC
              LIMIT $limit"
         )
     };
@@ -1687,8 +1687,8 @@ pub async fn recall_at(
         format!(
             "SELECT *, ((search::score(0) ?? 0) + (search::score(1) ?? 0) + (search::score(2) ?? 0)) AS _bm25_score FROM memory
              WHERE ({where_clause})
-               AND (summary @@ $query OR content @@ $query OR anchor_entities @@ $query)
-             ORDER BY importance DESC, event_at DESC
+               AND (summary @0@ $query OR content @1@ $query OR anchor_entities @2@ $query)
+             ORDER BY _bm25_score DESC, importance DESC
              LIMIT $limit"
         )
     };

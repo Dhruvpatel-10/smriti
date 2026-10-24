@@ -105,26 +105,7 @@ impl KbServer {
             crate::db::embeddings::fingerprint::check_or_initialize(&db, &fp).await?;
         }
 
-        let reranker = if let (Some(embedder), Some(voyage_cfg)) =
-            (&embedding_client, config.embeddings.voyage.as_ref())
-            && embedder.fingerprint().provider == "voyage"
-            && voyage_cfg.reranker.enabled
-        {
-            let api_key = std::env::var("VOYAGE_API_KEY")
-                .ok()
-                .or_else(|| voyage_cfg.api_key.clone())
-                .ok_or_else(|| {
-                    crate::error::KbError::Config(
-                        "VOYAGE_API_KEY required for reranker".to_string(),
-                    )
-                })?;
-            Some(Arc::new(Reranker::Voyage(
-                Arc::new(VoyageReranker::new(api_key, &voyage_cfg.reranker)?),
-                voyage_cfg.reranker.policy,
-            )))
-        } else {
-            None
-        };
+        let reranker = build_reranker(&embedding_client, &config.embeddings)?;
 
         let (llm_sidecar, main_sidecar_service) = if config.llm.enabled {
             tracing::info!(
@@ -421,4 +402,28 @@ impl ServerHandler for KbServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions("Knowledge Base — personal second brain MCP server. Store, search, and manage memories with full-text search, vector similarity, graph relations, flexible entities, domain tagging, and temporal queries.")
     }
+}
+
+/// Build the Voyage reranker when the embedder is Voyage and the reranker is
+/// enabled in config; `None` otherwise. Shared by the server and the bench.
+pub fn build_reranker(
+    embedding_client: &Option<Arc<dyn crate::db::embeddings::Embedder>>,
+    embeddings: &crate::config::EmbeddingConfig,
+) -> crate::error::Result<Option<Arc<Reranker>>> {
+    let (Some(embedder), Some(voyage_cfg)) = (embedding_client, embeddings.voyage.as_ref()) else {
+        return Ok(None);
+    };
+    if embedder.fingerprint().provider != "voyage" || !voyage_cfg.reranker.enabled {
+        return Ok(None);
+    }
+    let api_key = std::env::var("VOYAGE_API_KEY")
+        .ok()
+        .or_else(|| voyage_cfg.api_key.clone())
+        .ok_or_else(|| {
+            crate::error::KbError::Config("VOYAGE_API_KEY required for reranker".to_string())
+        })?;
+    Ok(Some(Arc::new(Reranker::Voyage(
+        Arc::new(VoyageReranker::new(api_key, &voyage_cfg.reranker)?),
+        voyage_cfg.reranker.policy,
+    ))))
 }

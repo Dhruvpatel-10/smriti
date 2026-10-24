@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use smriti::db::{client, embeddings::store_vector_pub, memory};
+use smriti::db::{client, dedup::DedupResult, embeddings::store_vector_pub, memory};
 use smriti::types::*;
 
 mod common;
@@ -287,61 +287,58 @@ async fn connect_twice_same_path_is_idempotent() {
 // TOCTOU / ATOMIC DEDUP
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Verify that two sequential `create_with_dedup_atomic` calls with an identical
-/// embedding vector result in exactly one accepted write and one duplicate rejection.
+/// Two sequential `create_with_dedup_atomic` calls with an identical vector:
+/// a *different* statement is kept with a near-duplicate warning (input is never
+/// dropped), while an exact restatement of the same text is rejected as an
+/// idempotent re-write.
 ///
-/// This tests the atomic transaction guarantee: the second call sees the first
-/// record in its dedup scan (both vector storage and record creation are atomic
-/// within the same transaction) and fires THROW.
-///
-/// Note: SurrealKV is single-writer, so we can't truly have two concurrent
-/// transactions. Sequential calls with vector pre-seeded test the same property:
-/// the dedup scan inside the transaction sees already-committed records.
+/// SurrealKV is single-writer, so sequential calls with the vector pre-seeded
+/// exercise the same property as concurrent ones: the in-transaction dedup scan
+/// sees already-committed records.
 #[tokio::test]
-async fn dedup_atomic_second_identical_call_rejected() {
+async fn dedup_atomic_keeps_similar_rejects_exact_restatement() {
     let (db, _dir) = test_db().await;
 
-    // A unit vector shared by both writers — cosine similarity = 1.0 > REJECT_THRESHOLD.
+    // A unit vector shared by all writers — cosine similarity = 1.0 > REJECT_THRESHOLD.
     let shared_vector: Vec<f32> = {
         let mut v = vec![0.0_f32; 256];
         v[0] = 1.0;
         v
     };
+    let draft = |summary: &str| {
+        memory::MemoryDraft::new(
+            summary.to_string(),
+            MemoryType::Semantic,
+            MemorySubtype::Fact,
+            Some(Channel::Cli),
+            Some(Modality::Text),
+        )
+    };
 
-    // First writer creates a record and immediately stores its vector
-    // (simulating what execute_inner does post-create).
-    let draft1 = memory::MemoryDraft::new(
-        "First writer — dedup atomicity test memory".to_string(),
-        MemoryType::Semantic,
-        MemorySubtype::Fact,
-        Some(Channel::Cli),
-        Some(Modality::Text),
-    );
-    let (first_id, _warn) = memory::create_with_dedup_atomic(&db, draft1, shared_vector.clone(), None)
+    let (first_id, _warn) = memory::create_with_dedup_atomic(&db, draft("First writer — dedup atomicity test memory"), shared_vector.clone(), None)
         .await
         .expect("first create should succeed");
-
-    // Store the vector so it is visible to the next call's dedup scan.
     store_vector_pub(&db, first_id.as_str(), shared_vector.clone())
         .await
         .expect("vector store for first record failed");
 
-    // Second writer tries with the same vector — should be rejected as duplicate.
-    let draft2 = memory::MemoryDraft::new(
-        "Second writer — dedup atomicity test memory".to_string(),
-        MemoryType::Semantic,
-        MemorySubtype::Fact,
-        Some(Channel::Cli),
-        Some(Modality::Text),
-    );
-    let r2 = memory::create_with_dedup_atomic(&db, draft2, shared_vector.clone(), None).await;
-
+    // Different text, same vector → stored, flagged as near-duplicate of the first.
+    let (second_id, warn) = memory::create_with_dedup_atomic(&db, draft("Second writer — dedup atomicity test memory"), shared_vector.clone(), None)
+        .await
+        .expect("a different statement must not be rejected");
+    assert_ne!(second_id, first_id);
     assert!(
-        matches!(&r2, Err(smriti::error::KbError::InvalidInput(msg)) if msg.contains("duplicate")),
-        "second create with identical vector should be rejected as duplicate; got: {r2:?}"
+        matches!(&warn, Some(DedupResult::Warning { similar_id, .. }) if similar_id == first_id.as_str()),
+        "expected near-duplicate warning pointing at the first memory; got {warn:?}"
     );
 
-    // Only one memory record should exist (the first one, not the rejected second).
+    // Exact restatement (case/whitespace-insensitive) → idempotent rejection.
+    let r3 = memory::create_with_dedup_atomic(&db, draft("  first writer — DEDUP atomicity test memory "), shared_vector.clone(), None).await;
+    assert!(
+        matches!(&r3, Err(smriti::error::KbError::InvalidInput(msg)) if msg.contains("duplicate")),
+        "exact restatement should be rejected as duplicate; got: {r3:?}"
+    );
+
     let total = memory::count(&db, None).await.unwrap();
-    assert_eq!(total, 1, "only one memory should exist after dedup rejection");
+    assert_eq!(total, 2, "first + second kept, restatement rejected");
 }

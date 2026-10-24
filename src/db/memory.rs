@@ -269,7 +269,10 @@ const DEDUP_REJECT_PREFIX: &str = "SMRITI_DEDUP_REJECT:";
 /// The transaction structure:
 ///   0. BEGIN TRANSACTION
 ///   1. LET $dup = (SELECT cosine scan scoped to author bucket)
-///   2. IF score > REJECT_THRESHOLD THEN THROW "SMRITI_DEDUP_REJECT:<id>" END
+///   2. IF score > REJECT_THRESHOLD AND the match is an exact restatement (same
+///      normalised summary, same content, same event_at when supplied)
+///      THEN THROW "SMRITI_DEDUP_REJECT:<id>" END — an idempotent re-write.
+///      A merely similar write is stored with a Warning; input is never dropped.
 ///   3. CREATE type::record('memory', $id) CONTENT {...}
 ///   4. COMMIT TRANSACTION
 ///
@@ -321,7 +324,7 @@ pub async fn create_with_dedup_atomic(
     let (dedup_sql, needs_author_bind) = if author.is_some() {
         (
             format!(
-                "LET $dup = (SELECT record::id(id) AS mem_id, \
+                "LET $dup = (SELECT record::id(id) AS mem_id, summary, content, event_at, \
                     vector::similarity::cosine(vector, $qv) AS score \
                     FROM memory \
                     WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author = $author_id \
@@ -332,7 +335,7 @@ pub async fn create_with_dedup_atomic(
     } else {
         (
             format!(
-                "LET $dup = (SELECT record::id(id) AS mem_id, \
+                "LET $dup = (SELECT record::id(id) AS mem_id, summary, content, event_at, \
                     vector::similarity::cosine(vector, $qv) AS score \
                     FROM memory \
                     WHERE {BITEMPORAL_ACTIVE} AND vector != NONE AND author IS NONE \
@@ -345,7 +348,11 @@ pub async fn create_with_dedup_atomic(
     let sql = format!(
         "BEGIN TRANSACTION;\n\
          {dedup_sql}\
-         IF array::len($dup) > 0 AND $dup[0].score > {REJECT_THRESHOLD} THEN \
+         $dup;\n\
+         IF array::len($dup) > 0 AND $dup[0].score > {REJECT_THRESHOLD} \
+            AND string::lowercase(string::trim($dup[0].summary)) = string::lowercase(string::trim($summary)) \
+            AND $dup[0].content = $content \
+            AND (!$event_given OR $dup[0].event_at = $event_at) THEN \
            THROW string::concat('{DEDUP_REJECT_PREFIX}', $dup[0].mem_id) \
          END;\n\
          CREATE type::record($table, $id) CONTENT {{\
@@ -399,6 +406,7 @@ pub async fn create_with_dedup_atomic(
         .bind(("visibility", enum_to_value(draft.visibility)?))
         .bind(("tags", draft.tags))
         .bind(("event_at", event))
+        .bind(("event_given", draft.event_at.is_some()))
         .bind(("created_at", now))
         .bind(("updated_at", now))
         .bind(("expires_at", expires))
@@ -417,20 +425,23 @@ pub async fn create_with_dedup_atomic(
         .await
         .map_err(|e| KbError::db(format!("atomic dedup+create for memory {id}"), e))?;
 
-    // Statement layout: BEGIN(0), LET $dup(1), IF/THROW/END(2), CREATE(3), COMMIT(4).
+    // Statement layout: BEGIN(0), LET $dup(1), $dup(2), IF/THROW/END(3), CREATE(4), COMMIT(5).
+    // LET yields no value in SurrealDB (and RETURN inside a transaction yields []),
+    // so a bare `$dup;` expression statement surfaces the match.
     //
     // When THROW fires at index 2, the outer `.await` still returns Ok(resp) —
     // the THROW is embedded in the per-statement response, not the top-level result.
-    // We detect it by inspecting the take(2) error for the DEDUP_REJECT_PREFIX.
-    // If THROW fired, index 3 (CREATE) and 4 (COMMIT) were skipped and will also
+    // We detect it by inspecting the take(3) error for the DEDUP_REJECT_PREFIX.
+    // If THROW fired, index 4 (CREATE) and 5 (COMMIT) were skipped and will also
     // return "query not executed due to a cancelled transaction" errors, which we
     // ignore once we know it was a dedup rejection.
 
-    // LET result at index 1 (defensive: unwrap_or_default if LET doesn't surface a value).
-    let dup_rows: Vec<serde_json::Value> = resp.take(1).unwrap_or_default();
+    // `$dup` at index 2. When THROW fires the whole transaction is cancelled
+    // and this errors too, so default to empty — the THROW branch below handles it.
+    let dup_rows: Vec<serde_json::Value> = resp.take(2).unwrap_or_default();
 
-    // Index 2: IF/THROW/END result — error here means THROW fired.
-    let throw_result: std::result::Result<Vec<serde_json::Value>, _> = resp.take(2);
+    // Index 3: IF/THROW/END result — error here means THROW fired.
+    let throw_result: std::result::Result<Vec<serde_json::Value>, _> = resp.take(3);
     if let Err(ref e) = throw_result {
         let msg = e.to_string();
         if msg.contains(DEDUP_REJECT_PREFIX) {
@@ -455,16 +466,18 @@ pub async fn create_with_dedup_atomic(
         });
     }
 
-    // Verify CREATE succeeded at index 3.
+    // Verify CREATE succeeded at index 4.
     let _created: Vec<serde_json::Value> = resp
-        .take(3)
+        .take(4)
         .map_err(|e| KbError::db("reading create result from atomic txn", e))?;
 
     // Build warning if the near-duplicate band was hit.
     let warning = dup_rows.first().and_then(|row| {
         let score = row.get("score").and_then(|v| v.as_f64())?;
         let mem_id = row.get("mem_id").and_then(|v| v.as_str())?.to_string();
-        if score > WARN_THRESHOLD && score <= REJECT_THRESHOLD && !mem_id.is_empty() {
+        // Above REJECT_THRESHOLD but not an exact restatement also lands here:
+        // the write is kept (never lose input) and flagged for consolidation.
+        if score > WARN_THRESHOLD && !mem_id.is_empty() {
             Some(DedupResult::Warning { similar_id: mem_id, similarity: score })
         } else {
             None
