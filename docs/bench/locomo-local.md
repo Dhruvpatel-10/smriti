@@ -26,3 +26,15 @@ memories=5882 dedup-rejected=0 ingest=1518s recall p50=705ms p95=794ms tokens@10
 | single-hop | 841 | 35.4 | 59.1 | 70.7 | 80.9 | 69.3 | 0.467 |
 | **all** | 1536 | 32.0 | 56.4 | 67.6 | 78.6 | 60.6 | 0.435 |
 
+
+### 10x pooled with HNSW index (B1)
+
+memories=5882 ingest=1699s recall p50=471ms p95=539ms (brute force: p50 705ms)
+
+| category | n | hit@1 | hit@5 | hit@10 | hit@25 | evidence recall@10 | MRR |
+|---|---|---|---|---|---|---|---|
+| multi-hop | 282 | 17.0 | 48.2 | 61.3 | 74.8 | 34.0 | 0.311 |
+| temporal | 321 | 39.3 | 63.2 | 71.3 | 81.0 | 68.0 | 0.500 |
+| open-domain | 92 | 13.0 | 29.3 | 40.2 | 54.3 | 30.0 | 0.221 |
+| single-hop | 841 | 34.4 | 57.0 | 68.8 | 79.8 | 67.5 | 0.453 |
+| **all** | 1536 | 30.9 | 55.0 | 66.3 | 77.6 | 59.2 | 0.423 |

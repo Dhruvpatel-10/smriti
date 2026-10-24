@@ -13,7 +13,7 @@
 //! Usage:
 //!   cargo run --release --example locomo_bench -- \
 //!       --data path/to/locomo10.json [--provider local|voyage] [--scale per-conv|pooled|both] \
-//!       [--convs N] [--out results/]
+//!       [--convs N] [--out results/] [--misses scratch/misses.md]
 //!
 //! Dataset: https://github.com/snap-research/locomo (CC BY-NC 4.0) — not vendored.
 
@@ -45,6 +45,7 @@ struct Args {
     convs: usize,
     out: PathBuf,
     include_adversarial: bool,
+    misses: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -55,6 +56,7 @@ fn parse_args() -> Result<Args> {
         convs: 10,
         out: PathBuf::from("bench-results"),
         include_adversarial: false,
+        misses: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -66,6 +68,7 @@ fn parse_args() -> Result<Args> {
             "--convs" => a.convs = val()?.parse()?,
             "--out" => a.out = PathBuf::from(val()?),
             "--include-adversarial" => a.include_adversarial = true,
+            "--misses" => a.misses = Some(PathBuf::from(val()?)),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -221,6 +224,8 @@ struct RunResult {
     ingest_secs: f64,
     memories: usize,
     rejected: usize,
+    /// Questions with no evidence turn in the top 10, for failure analysis.
+    misses: Vec<String>,
 }
 
 async fn run(
@@ -240,6 +245,10 @@ async fn run(
     // Ingest. Dedup may fold a turn into an existing memory — map many dia_ids to one id.
     let t0 = Instant::now();
     let mut id_to_dia: HashMap<String, Vec<String>> = HashMap::new();
+    let dia_text: HashMap<String, String> = convs
+        .iter()
+        .flat_map(|c| c.turns.iter().map(move |t| (format!("{}#{}", c.id, t.dia_id), format!("{}: {}", t.speaker, t.text))))
+        .collect();
     let mut rejected = 0usize;
     for c in convs {
         for t in &c.turns {
@@ -272,6 +281,7 @@ async fn run(
         ingest_secs,
         memories,
         rejected,
+        misses: vec![],
     };
     for c in convs {
         for q in &c.qa {
@@ -317,6 +327,18 @@ async fn run(
             }
             res.all.add(&ranks, gold.len());
             res.by_cat.entry(q.category).or_default().add(&ranks, gold.len());
+            if !ranks.iter().any(|r| *r < 10) {
+                let clip = |t: &str| truncate_chars(t, 160).replace('\n', " ");
+                let golds: Vec<String> = gold.iter().filter_map(|g| dia_text.get(g)).map(|t| clip(t)).collect();
+                let got: Vec<String> = out.memories.iter().take(3).map(|m| clip(&m.summary)).collect();
+                res.misses.push(format!(
+                    "- **[{}] {}**\n  - gold: {}\n  - got: {}\n",
+                    CATEGORY.get(q.category).copied().unwrap_or("?"),
+                    q.question,
+                    golds.join(" ‖ "),
+                    got.join(" ‖ ")
+                ));
+            }
         }
     }
     Ok(res)
@@ -388,14 +410,16 @@ async fn main() -> Result<()> {
         cfg.search.mmr.enabled,
     );
 
+    let mut misses_md = String::new();
     if matches!(args.scale.as_str(), "per-conv" | "both") {
-        let mut agg = RunResult { by_cat: BTreeMap::new(), all: Score::default(), latencies_ms: vec![], tokens_returned: vec![], ingest_secs: 0.0, memories: 0, rejected: 0 };
+        let mut agg = RunResult { by_cat: BTreeMap::new(), all: Score::default(), latencies_ms: vec![], tokens_returned: vec![], ingest_secs: 0.0, memories: 0, rejected: 0, misses: vec![] };
         for c in &convs {
             eprintln!("per-conv: {}", c.id);
             let r = run(&[*c], embedder.clone(), reranker.clone(), &cfg).await?;
             merge(&mut agg, r);
         }
         md.push_str(&report("scale 1x (one store per conversation)", &mut agg));
+        misses_md = agg.misses.concat();
     }
     if matches!(args.scale.as_str(), "pooled" | "both") {
         eprintln!("pooled: all {} conversations in one store", convs.len());
@@ -406,6 +430,11 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&args.out)?;
     let path = args.out.join(format!("locomo-{}.md", args.provider));
     std::fs::write(&path, &md)?;
+    // Misses quote dataset text (CC BY-NC) — only written where explicitly asked, never by default.
+    if let Some(p) = &args.misses {
+        std::fs::write(p, &misses_md)?;
+        eprintln!("wrote misses to {}", p.display());
+    }
     println!("{md}");
     eprintln!("wrote {}", path.display());
     Ok(())
@@ -429,4 +458,5 @@ fn merge(agg: &mut RunResult, r: RunResult) {
     agg.ingest_secs += r.ingest_secs;
     agg.memories += r.memories;
     agg.rejected += r.rejected;
+    agg.misses.extend(r.misses);
 }
