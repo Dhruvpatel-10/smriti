@@ -157,9 +157,15 @@ pub struct SpreadingConfig {
     /// Per-edge-type weight coefficients. See ADR-023.
     #[serde(default)]
     pub edge_weights: EdgeWeightsConfig,
+    /// Result slots held back for spreading-activation neighbours when the caller's
+    /// limit is > 10. Default 3 (historical behaviour). 0 lets primary results fill
+    /// the whole limit, which also leaves spreading no room to add neighbours.
+    #[serde(default = "default_reserve_slots")]
+    pub reserve_slots: usize,
 }
 
 fn default_spreading_cap() -> usize { 3 }
+fn default_reserve_slots() -> usize { 3 }
 fn default_hop_decay() -> f64 { 0.5 }
 
 impl Default for SpreadingConfig {
@@ -168,6 +174,7 @@ impl Default for SpreadingConfig {
             cap: default_spreading_cap(),
             hop_decay: default_hop_decay(),
             edge_weights: EdgeWeightsConfig::default(),
+            reserve_slots: default_reserve_slots(),
         }
     }
 }
@@ -193,7 +200,8 @@ pub enum FusionStrategy {
 /// score(c) = lambda * relevance(c) − (1 − lambda) * max_cos_sim(c, picked)
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MmrConfig {
-    /// Enable MMR diversification stage (ADR-031). Default true.
+    /// Enable MMR diversification stage (ADR-031). Default false until the
+    /// LoCoMo bench shows a gain (it shipped unmeasured).
     #[serde(default = "default_mmr_enabled")]
     pub enabled: bool,
     /// Relevance vs diversity weight. 1.0 = pure relevance (no diversity).
@@ -203,7 +211,7 @@ pub struct MmrConfig {
 }
 
 fn default_mmr_enabled() -> bool {
-    true
+    false
 }
 fn default_mmr_lambda() -> f64 {
     0.7
@@ -233,10 +241,18 @@ pub struct FusionConfig {
     /// RRF uses its own min_score passed from the caller.
     #[serde(default)]
     pub min_score: f64,
+    /// Candidates fetched from each of BM25 and vector, fused, and handed to MMR /
+    /// rerank before truncating to the caller's limit. Effective pool is
+    /// `max(limit, pool_size)`, capped at 200. Default 50.
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
 }
 
 fn default_vector_weight() -> f64 {
     0.7
+}
+fn default_pool_size() -> usize {
+    50
 }
 
 impl Default for FusionConfig {
@@ -245,6 +261,7 @@ impl Default for FusionConfig {
             strategy: FusionStrategy::default(),
             vector_weight: default_vector_weight(),
             min_score: 0.0,
+            pool_size: default_pool_size(),
         }
     }
 }
@@ -503,6 +520,10 @@ pub struct EmbeddingConfig {
     pub dimensions: usize,
     /// Voyage AI configuration. Only required when `provider = "voyage"`.
     pub voyage: Option<VoyageConfig>,
+    /// Characters of `content` appended to the embed text after the summary.
+    /// Default 0 (summary only). Changing it requires `kb_reembed`.
+    #[serde(default)]
+    pub content_prefix_chars: usize,
 }
 
 impl Default for EmbeddingConfig {
@@ -513,6 +534,7 @@ impl Default for EmbeddingConfig {
             model: "embeddinggemma-300m".to_string(),
             dimensions: 256,
             voyage: None,
+            content_prefix_chars: 0,
         }
     }
 }
@@ -581,6 +603,19 @@ pub struct LlmConfig {
     pub request_timeout_ms: u64,
     #[serde(default = "default_max_consecutive_failures")]
     pub max_consecutive_failures: u32,
+    /// Claude model the sidecar uses for typed-relation extraction.
+    #[serde(default = "default_sidecar_model")]
+    pub relation_model: String,
+    /// Claude model the sidecar uses for anchor-entity extraction.
+    #[serde(default = "default_sidecar_model")]
+    pub anchor_model: String,
+    /// Claude model the sidecar uses for consolidation synthesis.
+    #[serde(default = "default_sidecar_model")]
+    pub consolidation_model: String,
+}
+
+fn default_sidecar_model() -> String {
+    "claude-sonnet-4-5".to_string()
 }
 
 fn default_sidecar_path() -> PathBuf {
@@ -604,6 +639,9 @@ impl Default for LlmConfig {
             confidence_threshold: default_confidence_threshold(),
             request_timeout_ms: default_request_timeout_ms(),
             max_consecutive_failures: default_max_consecutive_failures(),
+            relation_model: default_sidecar_model(),
+            anchor_model: default_sidecar_model(),
+            consolidation_model: default_sidecar_model(),
         }
     }
 }

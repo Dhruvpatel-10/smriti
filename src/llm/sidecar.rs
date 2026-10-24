@@ -479,6 +479,9 @@ async fn supervisor_loop(
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .env_remove("ANTHROPIC_API_KEY")
+            .env("SMRITI_RELATION_MODEL", &config.relation_model)
+            .env("SMRITI_ANCHOR_MODEL", &config.anchor_model)
+            .env("SMRITI_CONSOLIDATION_MODEL", &config.consolidation_model)
             .spawn()
         {
             Ok(c) => c,
@@ -907,6 +910,7 @@ mod tests {
             confidence_threshold: 0.7,
             request_timeout_ms: 60_000,
             max_consecutive_failures: 3,
+            ..LlmConfig::default()
         };
         let base_dir = std::env::current_dir().unwrap();
         let (client, service) = SidecarClient::new(config, base_dir, CancellationToken::new()).await

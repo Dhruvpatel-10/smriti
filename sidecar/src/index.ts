@@ -6,6 +6,12 @@ import { query, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 // OAuth session (Max subscription) even when run standalone by a developer.
 delete process.env.ANTHROPIC_API_KEY;
 
+// Per-method Claude model, set by the Rust supervisor from `[llm].*_model`.
+const DEFAULT_MODEL = "claude-sonnet-4-5";
+const RELATION_MODEL = process.env.SMRITI_RELATION_MODEL || DEFAULT_MODEL;
+const ANCHOR_MODEL = process.env.SMRITI_ANCHOR_MODEL || DEFAULT_MODEL;
+const CONSOLIDATION_MODEL = process.env.SMRITI_CONSOLIDATION_MODEL || DEFAULT_MODEL;
+
 import { z } from "zod";
 import * as readline from "node:readline";
 
@@ -231,7 +237,7 @@ async function extractRelations(
     const gen = query({
       prompt,
       options: {
-        model: "claude-sonnet-4-5",
+        model: RELATION_MODEL,
         systemPrompt: SYSTEM_PROMPT,
         allowedTools: [],
         permissionMode: "dontAsk",
@@ -299,7 +305,7 @@ async function extractAnchors(
     const gen = query({
       prompt,
       options: {
-        model: "claude-sonnet-4-5",
+        model: ANCHOR_MODEL,
         systemPrompt: ANCHOR_SYSTEM_PROMPT,
         allowedTools: [],
         permissionMode: "dontAsk",
@@ -374,7 +380,7 @@ async function synthesizeConsolidation(
     const gen = query({
       prompt,
       options: {
-        model: "claude-sonnet-4-5",
+        model: CONSOLIDATION_MODEL,
         systemPrompt: CONSOLIDATION_SYSTEM_PROMPT,
         allowedTools: [],
         permissionMode: "dontAsk",

@@ -22,7 +22,7 @@ use crate::types::*;
 pub fn build_embed_text(input: &RememberInput) -> String {
     let domain = input.domain.as_deref().unwrap_or(&[]);
     let people = input.people.as_deref().unwrap_or(&[]);
-    validation::contextual_text(
+    let contextual = validation::contextual_text(
         &input.summary,
         input.memory_type,
         input.subtype,
@@ -31,7 +31,8 @@ pub fn build_embed_text(input: &RememberInput) -> String {
         people,
         input.channel,
         input.modality,
-    )
+    );
+    validation::with_content_prefix(contextual, input.content.as_deref())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -437,7 +438,7 @@ async fn execute_inner(
     }
 
     // Fire-and-forget: extract typed relations + anchor entities via LLM sidecar.
-    // Skipped for sensitive memories (never sent to LLM) and when sidecar is absent.
+    // Runs for every visibility (owner decision 2026-10-24); skipped only when the sidecar is absent.
     // Summary-only — never pass full content as a prompt-injection defense baseline.
     //
     // Both anchor and relation extraction run concurrently via tokio::join!.
@@ -450,102 +451,86 @@ async fn execute_inner(
     // CONTENT block) so recall always sees a defined value even before the async
     // task runs.
     if let Some(sidecar) = llm_sidecar.as_ref() {
-        if visibility != Visibility::Sensitive {
-            let status_db = db.clone();
-            let extract_db = db.clone();
-            let extract_sidecar = sidecar.clone();
-            let extract_id = id.clone();
-            let extract_summary = summary_text.clone();
-            let extract_project = project_for_extract;
-            let extract_domain = domain.first().cloned();
-            let extract_threshold = sidecar.confidence_threshold();
+        let status_db = db.clone();
+        let extract_db = db.clone();
+        let extract_sidecar = sidecar.clone();
+        let extract_id = id.clone();
+        let extract_summary = summary_text.clone();
+        let extract_project = project_for_extract;
+        let extract_domain = domain.first().cloned();
+        let extract_threshold = sidecar.confidence_threshold();
 
-            let anchor_db = db.clone();
-            let anchor_sidecar = sidecar.clone();
-            let anchor_id = id.clone();
-            let anchor_summary = summary_text.clone();
-            let anchor_proj = project_for_anchors;
-            let anchor_domain = domain.first().cloned();
+        let anchor_db = db.clone();
+        let anchor_sidecar = sidecar.clone();
+        let anchor_id = id.clone();
+        let anchor_summary = summary_text.clone();
+        let anchor_proj = project_for_anchors;
+        let anchor_domain = domain.first().cloned();
 
-            let status_id = id.clone();
-            tasks.spawn(async move {
-                let relation_fut = crate::llm::extract_and_persist(
-                    &extract_db,
-                    &extract_sidecar,
-                    &extract_id,
-                    &extract_summary,
-                    None, // summary-only — never send content to LLM (injection defense)
-                    extract_project.as_deref(),
-                    extract_domain.as_deref(),
-                    extract_threshold,
-                );
-                let anchor_fut = crate::llm::extractor::extract_anchors_and_persist(
-                    &anchor_db,
-                    &anchor_sidecar,
-                    &anchor_id,
-                    &anchor_summary,
-                    anchor_proj.as_deref(),
-                    anchor_domain.as_deref(),
-                );
+        let status_id = id.clone();
+        tasks.spawn(async move {
+            let relation_fut = crate::llm::extract_and_persist(
+                &extract_db,
+                &extract_sidecar,
+                &extract_id,
+                &extract_summary,
+                None, // summary-only — never send content to LLM (injection defense)
+                extract_project.as_deref(),
+                extract_domain.as_deref(),
+                extract_threshold,
+            );
+            let anchor_fut = crate::llm::extractor::extract_anchors_and_persist(
+                &anchor_db,
+                &anchor_sidecar,
+                &anchor_id,
+                &anchor_summary,
+                anchor_proj.as_deref(),
+                anchor_domain.as_deref(),
+            );
 
-                let (relation_result, anchor_result) = tokio::join!(relation_fut, anchor_fut);
+            let (relation_result, anchor_result) = tokio::join!(relation_fut, anchor_fut);
 
-                let relation_ok = match relation_result {
-                    Ok(stats) => {
-                        if stats.persisted > 0 {
-                            tracing::info!(
-                                id = %extract_id,
-                                persisted = stats.persisted,
-                                returned = stats.returned,
-                                "typed_relation extraction"
-                            );
-                        }
-                        true
+            let relation_ok = match relation_result {
+                Ok(stats) => {
+                    if stats.persisted > 0 {
+                        tracing::info!(
+                            id = %extract_id,
+                            persisted = stats.persisted,
+                            returned = stats.returned,
+                            "typed_relation extraction"
+                        );
                     }
-                    Err(e) => {
-                        tracing::warn!(id = %extract_id, "extract_and_persist failed: {e}");
-                        false
-                    }
-                };
-
-                let anchor_ok = match anchor_result {
-                    Ok(count) if count > 0 => {
-                        tracing::info!(id = %anchor_id, count, "anchor entities stored");
-                        true
-                    }
-                    Ok(_) => true, // 0 anchors is not an error
-                    Err(e) => {
-                        tracing::warn!(id = %anchor_id, "extract_anchors_and_persist failed: {e}");
-                        false
-                    }
-                };
-
-                let agg_status = match (anchor_ok, relation_ok) {
-                    (true, true) => crate::types::ExtractionStatus::Complete,
-                    (false, true) => crate::types::ExtractionStatus::AnchorFailed,
-                    (true, false) => crate::types::ExtractionStatus::RelationFailed,
-                    (false, false) => crate::types::ExtractionStatus::BothFailed,
-                };
-
-                if let Err(e) = crate::db::memory::set_extraction_status(&status_db, &status_id, agg_status).await {
-                    tracing::warn!(id = %status_id, "set_extraction_status failed: {e}");
+                    true
                 }
-            }).await;
-        } else {
-            tracing::debug!(id = %id, "skipping LLM extraction for sensitive memory");
-            // Mark sensitive memories as skipped so they don't appear in retry queries.
-            let skip_db = db.clone();
-            let skip_id = id.clone();
-            tasks.spawn(async move {
-                if let Err(e) = crate::db::memory::set_extraction_status(
-                    &skip_db,
-                    &skip_id,
-                    crate::types::ExtractionStatus::Skipped,
-                ).await {
-                    tracing::warn!(id = %skip_id, "set_extraction_status(skipped) failed: {e}");
+                Err(e) => {
+                    tracing::warn!(id = %extract_id, "extract_and_persist failed: {e}");
+                    false
                 }
-            }).await;
-        }
+            };
+
+            let anchor_ok = match anchor_result {
+                Ok(count) if count > 0 => {
+                    tracing::info!(id = %anchor_id, count, "anchor entities stored");
+                    true
+                }
+                Ok(_) => true, // 0 anchors is not an error
+                Err(e) => {
+                    tracing::warn!(id = %anchor_id, "extract_anchors_and_persist failed: {e}");
+                    false
+                }
+            };
+
+            let agg_status = match (anchor_ok, relation_ok) {
+                (true, true) => crate::types::ExtractionStatus::Complete,
+                (false, true) => crate::types::ExtractionStatus::AnchorFailed,
+                (true, false) => crate::types::ExtractionStatus::RelationFailed,
+                (false, false) => crate::types::ExtractionStatus::BothFailed,
+            };
+
+            if let Err(e) = crate::db::memory::set_extraction_status(&status_db, &status_id, agg_status).await {
+                tracing::warn!(id = %status_id, "set_extraction_status failed: {e}");
+            }
+        }).await;
     }
 
     // Fire-and-forget: refresh agent's last_active timestamp.

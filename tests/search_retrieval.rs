@@ -1107,6 +1107,7 @@ async fn weighted_spreading_custom_config_changes_order() {
             involves: 1.5,
             ..Default::default()
         },
+        ..Default::default()
     };
 
     let custom_results = search::recall(
@@ -1177,6 +1178,7 @@ async fn recall_with_convex_fusion_wires_correctly() {
         strategy: FusionStrategy::ConvexCombination,
         vector_weight: 0.7,
         min_score: 0.0,
+        ..Default::default()
     };
 
     // RRF baseline for the same query.
@@ -1227,6 +1229,7 @@ async fn recall_cc_empty_result_with_no_matches() {
         strategy: FusionStrategy::ConvexCombination,
         vector_weight: 0.7,
         min_score: 0.0,
+        ..Default::default()
     };
 
     let results = search::recall(

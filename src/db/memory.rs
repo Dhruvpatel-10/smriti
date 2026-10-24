@@ -255,7 +255,7 @@ pub async fn create(db: &SurrealClient, draft: MemoryDraft) -> Result<MemoryId> 
     .bind(("valid_until", draft.valid_until))
     .bind(("is_static", is_static))
     .await
-    .map_err(|e| KbError::db(format!("creating memory {}", &id), e))?;
+    .map_err(|e| KbError::db(format!("creating memory {}", id), e))?;
 
     Ok(id)
 }

@@ -848,6 +848,14 @@ fn is_entity_anchored(person: Option<&str>) -> bool {
     person.is_some()
 }
 
+/// Upper bound on the per-source candidate pool.
+const MAX_POOL: usize = 200;
+
+/// Effective candidate pool: `max(limit, pool_size)`, capped at [`MAX_POOL`].
+fn pool_size(limit: u8, fusion_cfg: &FusionConfig) -> usize {
+    (limit as usize).max(fusion_cfg.pool_size).min(MAX_POOL)
+}
+
 // ── Adaptive reranker gate (ADR-022) ────────────────────────────────────────
 
 /// Decide whether to invoke the cross-encoder reranker for this query.
@@ -904,8 +912,10 @@ fn should_rerank(
         return false;
     }
 
-    // Force: semantic precision types — recall is expected to be exact.
-    matches!(memory_type, Some(MemoryType::Semantic))
+    // Default: 4-6 word query of any non-working type — rerank. The old
+    // Semantic-only fallthrough left episodic/procedural/prospective queries
+    // in raw fusion order, where Recall@1 is weakest.
+    true
 }
 
 // ── Primary Recall ──────────────────────────────────────────────────────────
@@ -946,12 +956,15 @@ pub async fn recall(
     spreading_override: Option<bool>,
     mmr_cfg: &MmrConfig,
 ) -> Result<Vec<MemorySummary>> {
-    let fetch_limit = limit.min(50) as i64;
+    // Candidate pool: fetch and fuse more than the caller asked for so MMR and
+    // rerank can promote evidence ranked below `limit`; truncate afterwards.
+    let pool = pool_size(limit, fusion_cfg);
+    let fetch_limit = pool as i64;
 
     // For entity-anchored queries, increase BM25 fetch to ensure we have
     // enough candidates before the entity intersection in Step 4.
     let bm25_fetch = if is_entity_anchored(person) {
-        (fetch_limit * 2).min(50)
+        (fetch_limit * 2).min(MAX_POOL as i64 * 2)
     } else {
         fetch_limit
     };
@@ -1142,13 +1155,16 @@ pub async fn recall(
 
     let _fusion_started = Instant::now();
     let limit_usize = limit.min(50) as usize;
-    // Cycle 4: reserve 3 slots for spreading activation when limit is generous enough.
-    // At small limits, don't sacrifice primary recall for graph hops.
+    // Reserve slots for spreading activation when limit is generous enough
+    // (`[search.spreading].reserve_slots`). At small limits, don't sacrifice
+    // primary recall for graph hops.
     let primary_cap = if limit_usize > 10 {
-        limit_usize.saturating_sub(3)
+        limit_usize.saturating_sub(spreading_cfg.reserve_slots)
     } else {
         limit_usize
     };
+    // Fusion keeps the whole pool; results are cut to `primary_cap` after rerank.
+    let fused_cap = pool.max(primary_cap);
     let (mut memories, rrf_scores) = if vector_memories.is_empty() {
         // No vector signal — RRF score for a single source at rank r is 1/(K+r+1).
         // Apply min_score gate manually so callers see consistent semantics
@@ -1157,21 +1173,21 @@ pub async fn recall(
             .into_iter()
             .enumerate()
             .filter(|(rank, _)| rrf_score(*rank) >= min_score)
-            .take(primary_cap)
+            .take(fused_cap)
             .map(|(_, m)| m)
             .collect();
         let scores: Vec<f64> = (0..ranked.len()).map(rrf_score).collect();
         (ranked, scores)
     } else {
         match fusion_cfg.strategy {
-            FusionStrategy::Rrf => rrf_fuse(&bm25_memories, &vector_memories, primary_cap, min_score),
+            FusionStrategy::Rrf => rrf_fuse(&bm25_memories, &vector_memories, fused_cap, min_score),
             FusionStrategy::ConvexCombination => convex_fuse(
                 &bm25_memories,
                 &bm25_raw_scores,
                 &vector_memories,
                 &vec_raw_scores,
                 fusion_cfg.vector_weight,
-                primary_cap,
+                fused_cap,
                 fusion_cfg.min_score,
             ),
         }
@@ -1229,6 +1245,12 @@ pub async fn recall(
             decision = false,
             "rerank gate"
         );
+    }
+
+    // Without a person filter the pool is cut to the result cap here; the person
+    // filter below intersects against the full pool and truncates itself.
+    if person.is_none() {
+        memories.truncate(primary_cap);
     }
 
     // ── Step 4: Entity-anchored person filter ─────────────────────────
@@ -1439,6 +1461,8 @@ pub async fn recall(
             memories.truncate(primary_cap);
         }
     }
+    // Person paths that resolve no entity skip the truncate above.
+    memories.truncate(primary_cap);
 
     // ── Step 4.5: Alias FTS pre-expansion (ADR-030) ─────────────────────
     //
@@ -1646,7 +1670,8 @@ pub async fn recall_at(
     }
 
     let where_clause = conditions.join(" AND ");
-    let fetch_limit = limit.min(50) as i64;
+    let pool = pool_size(limit, fusion_cfg);
+    let fetch_limit = pool as i64;
     let limit_usize = limit.min(50) as usize;
 
     // ── BM25 full-text search ────────────────────────────────────────────
@@ -1780,21 +1805,21 @@ pub async fn recall_at(
             .into_iter()
             .enumerate()
             .filter(|(rank, _)| rrf_score(*rank) >= 0.0)
-            .take(limit_usize)
+            .take(pool)
             .map(|(_, m)| m)
             .collect();
         let scores: Vec<f64> = (0..ranked.len()).map(rrf_score).collect();
         (ranked, scores)
     } else {
         match fusion_cfg.strategy {
-            FusionStrategy::Rrf => rrf_fuse(&bm25_memories, &vector_memories, limit_usize, 0.0),
+            FusionStrategy::Rrf => rrf_fuse(&bm25_memories, &vector_memories, pool, 0.0),
             FusionStrategy::ConvexCombination => convex_fuse(
                 &bm25_memories,
                 &bm25_raw_scores_at,
                 &vector_memories,
                 &vec_raw_scores_at,
                 fusion_cfg.vector_weight,
-                limit_usize,
+                pool,
                 fusion_cfg.min_score,
             ),
         }
@@ -1843,6 +1868,7 @@ pub async fn recall_at(
         );
     }
 
+    memories.truncate(limit_usize);
     Ok(memories)
 }
 
@@ -2193,9 +2219,9 @@ mod tests {
     }
 
     #[test]
-    fn should_rerank_adaptive_medium_query_episodic_skips() {
-        // 4-6 words + Episodic, no person → false.
-        assert!(!should_rerank("what happened at the meeting", &[0.05, 0.04], None, Some(MemoryType::Episodic), None, RerankerPolicy::Adaptive));
+    fn should_rerank_adaptive_medium_query_episodic_reranks() {
+        // 4-6 words + Episodic, no person → true (no Semantic-only fallthrough).
+        assert!(should_rerank("what happened at the meeting", &[0.05, 0.04], None, Some(MemoryType::Episodic), None, RerankerPolicy::Adaptive));
     }
 
     // ── min_max_normalize tests ──────────────────────────────────────────────

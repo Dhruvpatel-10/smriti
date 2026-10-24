@@ -36,6 +36,7 @@ fn mock_config(timeout_ms: u64) -> LlmConfig {
         confidence_threshold: 0.7,
         request_timeout_ms: timeout_ms,
         max_consecutive_failures: 5,
+        ..LlmConfig::default()
     }
 }
 
@@ -150,6 +151,7 @@ async fn timeout_fires_when_sidecar_hangs() {
         confidence_threshold: 0.7,
         request_timeout_ms: 1,    // 1 ms — will fire before sidecar can respond
         max_consecutive_failures: 5,
+        ..LlmConfig::default()
     };
     let (fast_client, service2) = SidecarClient::new(fast_timeout_config, base_dir(), CancellationToken::new())
         .await
@@ -207,6 +209,7 @@ async fn client_restarts_after_crash() {
         confidence_threshold: 0.7,
         request_timeout_ms: 5000,
         max_consecutive_failures: 5,
+        ..LlmConfig::default()
     };
 
     let (client, service) = SidecarClient::new(config, base_dir(), CancellationToken::new())
@@ -246,6 +249,7 @@ async fn circuit_breaker_after_max_failures() {
         confidence_threshold: 0.7,
         request_timeout_ms: 5000,
         max_consecutive_failures: 5,
+        ..LlmConfig::default()
     };
 
     // new() itself should fail because the path doesn't exist — KbError::Config.
@@ -296,6 +300,7 @@ async fn dropped_inflight_counter_increments() {
         confidence_threshold: 0.7,
         request_timeout_ms: 5000,
         max_consecutive_failures: 5,
+        ..LlmConfig::default()
     };
 
     let (client, service) = SidecarClient::new(config, base_dir(), CancellationToken::new())

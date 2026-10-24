@@ -38,7 +38,7 @@ pub struct ReembedResult {
 /// (`max_chunks_per_doc > 1`), sibling chunks (same parent) are grouped and
 /// embedded in one batched call to restore voyage-context-3 contextualization.
 ///
-/// Non-chunk rows are embedded from `summary` (existing behaviour).
+/// Non-chunk rows are embedded from the same contextual text the write path uses.
 pub async fn reembed_all(
     db: &SurrealClient,
     embedder: Arc<dyn Embedder>,
@@ -71,6 +71,13 @@ pub async fn reembed_all(
                     record::id(id) AS mid,
                     summary,
                     content,
+                    memory_type,
+                    subtype,
+                    project,
+                    domain,
+                    people,
+                    channel,
+                    modality,
                     created_at,
                     IF array::len(->extends->memory) > 0 THEN true ELSE false END AS is_chunk,
                     array::first(->extends->memory.id) AS parent_id
@@ -238,7 +245,39 @@ pub async fn reembed_all(
     })
 }
 
-/// Re-embed a single non-chunk row from its `summary` field.
+/// Rebuild the write-path embed text (`contextual_text` + content prefix) from a
+/// stored row, so re-embedded vectors match freshly written ones. Falls back to
+/// the bare summary when type/subtype cannot be parsed (pre-taxonomy rows).
+fn embed_text_from_row(row: &serde_json::Value, summary: &str) -> String {
+    fn field<T: serde::de::DeserializeOwned>(row: &serde_json::Value, key: &str) -> Option<T> {
+        row.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+    let (Some(memory_type), Some(subtype)) = (
+        field::<crate::types::MemoryType>(row, "memory_type"),
+        field::<crate::types::MemorySubtype>(row, "subtype"),
+    ) else {
+        return summary.to_string();
+    };
+    let project: Option<String> = field(row, "project");
+    let domains: Vec<String> = field(row, "domain").unwrap_or_default();
+    let people: Vec<String> = field(row, "people").unwrap_or_default();
+    let contextual = crate::db::validation::contextual_text(
+        summary,
+        memory_type,
+        subtype,
+        project.as_deref(),
+        &domains,
+        &people,
+        field(row, "channel"),
+        field(row, "modality"),
+    );
+    crate::db::validation::with_content_prefix(
+        contextual,
+        row.get("content").and_then(|v| v.as_str()),
+    )
+}
+
+/// Re-embed a single non-chunk row with the same text the write path embeds.
 ///
 /// Returns `(updated, failed)` counts for this one row.
 async fn reembed_single_from_summary(
@@ -259,7 +298,8 @@ async fn reembed_single_from_summary(
         return (0, 1);
     }
 
-    match embedder.embed_document(summary).await {
+    let text = embed_text_from_row(row, summary);
+    match embedder.embed_document(&text).await {
         Ok(vector) => match store_vector(db, mid, vector).await {
             Ok(()) => (1, 0),
             Err(e) => {

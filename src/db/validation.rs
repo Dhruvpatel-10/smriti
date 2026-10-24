@@ -146,10 +146,49 @@ pub fn contextual_text(
     parts.join(" ")
 }
 
+/// Characters of `content` appended to the embed text (P0.8). 0 = summary only.
+/// Set once at startup from `[embeddings].content_prefix_chars`; changing it
+/// changes what stored vectors represent, so run `kb_reembed` afterwards.
+static EMBED_CONTENT_CHARS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_embed_content_chars(n: usize) {
+    EMBED_CONTENT_CHARS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Append up to [`EMBED_CONTENT_CHARS`] characters of `content` to the
+/// contextual text. Shared by the write path and `kb_reembed` so both embed
+/// identical text.
+pub fn with_content_prefix(contextual: String, content: Option<&str>) -> String {
+    append_content_prefix(contextual, content, EMBED_CONTENT_CHARS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn append_content_prefix(mut contextual: String, content: Option<&str>, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return contextual;
+    }
+    if let Some(c) = content.map(str::trim).filter(|c| !c.is_empty()) {
+        contextual.push('\n');
+        contextual.extend(c.chars().take(max_chars));
+    }
+    contextual
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_prefix_off_returns_contextual_unchanged() {
+        assert_eq!(append_content_prefix("ctx".into(), Some("body"), 0), "ctx");
+    }
+
+    #[test]
+    fn content_prefix_truncates_on_char_boundary() {
+        assert_eq!(append_content_prefix("ctx".into(), Some("  héllo world "), 5), "ctx\nhéllo");
+        assert_eq!(append_content_prefix("ctx".into(), None, 5), "ctx");
+        assert_eq!(append_content_prefix("ctx".into(), Some("   "), 5), "ctx");
+    }
+
     use super::*;
 
     // -- Content validation --

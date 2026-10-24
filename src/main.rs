@@ -179,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
     // auto-detect (journald when INVOCATION_ID set, else pretty).
     // Stdout is reserved for MCP protocol in stdio mode — all formats write to stderr or journald.
     init_tracing(config.observability.log_format.as_deref());
+    smriti::db::validation::set_embed_content_chars(config.embeddings.content_prefix_chars);
 
     // ADR-028 Step 4: per-stage recall latency histograms. Initialised once
     // at daemon startup; record() and snapshot_and_reset() are no-ops until.
@@ -256,7 +257,6 @@ async fn main() -> anyhow::Result<()> {
                     "SELECT id, summary, project, domain FROM memory
                      WHERE anchor_entities IS NONE
                        AND status = 'active'
-                       AND visibility != 'sensitive'
                      LIMIT $limit START $offset",
                 )
                 .bind(("limit", page_size))
@@ -384,7 +384,6 @@ async fn main() -> anyhow::Result<()> {
                     "SELECT id, summary, project, domain FROM memory
                      WHERE extraction_status IN $statuses
                        AND status = 'active'
-                       AND visibility != 'sensitive'
                      LIMIT $limit START $offset",
                 )
                 .bind(("statuses", retryable.clone()))

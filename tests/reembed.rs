@@ -120,6 +120,7 @@ fn make_embedder() -> Arc<dyn Embedder> {
         model: "all-minilm-l6-v2".to_string(),
         dimensions: 384,
         voyage: None,
+        content_prefix_chars: 0,
     };
     Arc::new(LocalEmbedder::new(&config))
 }

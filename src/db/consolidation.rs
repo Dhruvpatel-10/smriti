@@ -499,7 +499,7 @@ pub async fn consolidate_atomic(
 
     let mut response = q
         .await
-        .map_err(|e| KbError::db(format!("consolidate_atomic for new memory {}", &new_id), e))?;
+        .map_err(|e| KbError::db(format!("consolidate_atomic for new memory {}", new_id), e))?;
 
     // Validate each statement's result; any embedded SurrealQL error aborts the
     // consolidation and surfaces a `KbError::Db`. The surrounding
@@ -527,7 +527,6 @@ pub async fn consolidate_atomic(
 /// - `tags`        = union(source.tags), deduped, order-stable
 /// - `domain`      = union(source.domain), deduped, order-stable
 /// - `visibility`  = most-restrictive: Sensitive > Private > Standard
-///   (Sensitive sources are rejected — caller must filter them out first)
 /// - `subtype`     = first source's (heuristic 1 clusters by subtype; assert not mixed)
 /// - `project`     = first source's (heuristic 1 clusters by project; same reasoning)
 /// - `channel`     = first source's (cluster-wide values rarely differ)
@@ -705,14 +704,6 @@ async fn fetch_source_metadata(
                 });
             }
         }
-    }
-
-    // Sensitive sources must be filtered by the caller (find_candidates only returns
-    // Standard visibility clusters). Reject here as a safety gate.
-    if max_visibility == Visibility::Sensitive {
-        return Err(KbError::InvalidInput(
-            "cannot consolidate: cluster contains Sensitive memories".to_string(),
-        ));
     }
 
     let inherited_valid_until = if all_have_valid_until { max_valid_until } else { None };
